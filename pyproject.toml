@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "coco-code"
+version = "0.1.0"
+description = "A terminal LLM conversation client for CoCo Code."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.70.0",
+    "openai>=2.0.0",
+    "pyyaml>=6.0.2",
+    "rich>=14.0.0",
+    "textual>=6.0.0",
+]
+
+[project.scripts]
+coco-code = "coco_code.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.18.0",
+    "pytest>=8.4.0",
+    "ruff>=0.14.0",
+]
+[dependency-groups]
+dev = [
+    "mypy>=1.18.0",
+    "pytest>=8.4.0",
+    "ruff>=0.14.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/coco_code"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+ignore_missing_imports = true
+warn_unused_configs = true
+[tool.pytest.ini_options]
+norecursedirs = [
+    ".codeagent",
+    ".coco-code",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "CoCo-Coding-AI-Agent-upload",
+    "TestAgentRun",
+    "%SystemDrive%",
+]

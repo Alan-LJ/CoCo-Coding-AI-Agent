@@ -1,0 +1,67 @@
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+from coco_code.config import Config, ProviderConfig
+from coco_code.tui.app import CoCoCodeApp, PromptTextArea, SessionState
+
+
+def test_single_provider_app_mounts_headless() -> None:
+    async def run() -> None:
+        provider = ProviderConfig(
+            name="Fake OpenAI",
+            protocol="openai",
+            model="fake-model",
+            api_key="secret-key",
+        )
+        app = CoCoCodeApp(Config(providers=[provider]), cwd=Path("P:/AI/CoCo Code_Agent"))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.state == SessionState.IDLE
+            assert app.active_cfg == provider
+            assert app.query_one("#input", PromptTextArea).disabled is False
+
+    asyncio.run(run())
+
+def test_multi_provider_selection_mounts_headless() -> None:
+    async def run() -> None:
+        providers = [
+            ProviderConfig(
+                name="Fake Claude",
+                protocol="anthropic",
+                model="claude-fake",
+                api_key="secret-key",
+            ),
+            ProviderConfig(
+                name="Fake OpenAI",
+                protocol="openai",
+                model="openai-fake",
+                api_key="secret-key",
+            ),
+        ]
+        app = CoCoCodeApp(Config(providers=providers), cwd=Path("P:/AI/CoCo Code_Agent"))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.state == SessionState.SELECTING
+            assert app.query_one("#input", PromptTextArea).disabled is True
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.state == SessionState.IDLE
+            assert app.active_cfg in providers
+            assert app.query_one("#input", PromptTextArea).disabled is False
+
+    asyncio.run(run())
+
+
+def test_parse_agent_request_modes() -> None:
+    from coco_code.agent import AgentMode
+    from coco_code.tui.app import parse_agent_request
+
+    assert parse_agent_request("hello").mode == AgentMode.AGENT
+    plan = parse_agent_request("/plan inspect")
+    assert plan.mode == AgentMode.PLAN
+    assert plan.text == "inspect"
+    do = parse_agent_request("/do execute")
+    assert do.mode == AgentMode.DO
+    assert do.text == "execute"

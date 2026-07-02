@@ -1,0 +1,20 @@
+# CoCo Code configuration example.
+# Keep real API keys out of this file when committing to GitHub.
+# Prefer environment variables:
+# - anthropic uses ANTHROPIC_API_KEY
+# - openai and openai-compat use OPENAI_API_KEY
+
+providers:
+  - name: Claude
+    protocol: anthropic
+    model: claude-sonnet-4-5
+    thinking: true
+
+  - name: OpenAI
+    protocol: openai
+    model: gpt-5.1
+
+  - name: OpenAI Compatible
+    protocol: openai-compat
+    model: qwen3-coder
+    base_url: https://example.com/v1
