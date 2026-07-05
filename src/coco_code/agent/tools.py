@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from time import monotonic
 
 from coco_code.agent.types import AgentEvent, AgentEventType, AgentMode, ToolBatch
+from coco_code.permission import Mode as PermissionMode
 from coco_code.tools.base import ConfirmationPolicy, ToolCall, ToolResult, ToolSpec
 from coco_code.tools.executor import ToolExecutor
 from coco_code.tools.registry import ToolRegistry, ToolRegistryError
@@ -27,9 +28,11 @@ def validate_tool_allowed(
     try:
         spec = registry.get(call.name).spec
     except ToolRegistryError:
-        return _tool_error(call, f"未知工具：{call.name}", started)
+        return _tool_error(call, f"Unknown tool: {call.name}", started)
     if not is_tool_allowed_in_mode(spec, mode):
-        return _tool_error(call, f"当前模式不允许调用工具：{spec.name}", started, spec.name)
+        return _tool_error(
+            call, f"Tool is not allowed in current mode: {spec.name}", started, spec.name
+        )
     return None
 
 
@@ -67,6 +70,7 @@ async def execute_tool_batches(
     executor: ToolExecutor,
     on_event: AgentEventCallback,
     concurrency_limit: int,
+    permission_mode: PermissionMode = PermissionMode.DEFAULT,
 ) -> list[ToolResult]:
     results: list[ToolResult] = []
     total = len(batches)
@@ -74,11 +78,19 @@ async def execute_tool_batches(
         await on_event(AgentEvent(type=AgentEventType.TOOL_BATCH_STARTED, tool_calls=batch.calls))
         if batch.concurrent:
             results.extend(
-                await _execute_concurrent_batch(batch.calls, executor, on_event, concurrency_limit)
+                await _execute_concurrent_batch(
+                    batch.calls,
+                    executor,
+                    on_event,
+                    concurrency_limit,
+                    permission_mode,
+                )
             )
         else:
             for call in batch.calls:
-                results.append(await _execute_one(call, executor, on_event, index, total))
+                results.append(
+                    await _execute_one(call, executor, on_event, index, total, permission_mode)
+                )
     return results
 
 
@@ -87,12 +99,13 @@ async def _execute_concurrent_batch(
     executor: ToolExecutor,
     on_event: AgentEventCallback,
     concurrency_limit: int,
+    permission_mode: PermissionMode,
 ) -> list[ToolResult]:
     semaphore = asyncio.Semaphore(max(1, concurrency_limit))
 
     async def run(call: ToolCall) -> ToolResult:
         async with semaphore:
-            return await _execute_one(call, executor, on_event, None, None)
+            return await _execute_one(call, executor, on_event, None, None, permission_mode)
 
     return list(await asyncio.gather(*(run(call) for call in calls)))
 
@@ -103,9 +116,10 @@ async def _execute_one(
     on_event: AgentEventCallback,
     batch_index: int | None,
     batch_total: int | None,
+    permission_mode: PermissionMode,
 ) -> ToolResult:
     await on_event(AgentEvent(type=AgentEventType.TOOL_STARTED, tool_call=call))
-    return await executor.execute(call)
+    return await executor.execute(call, permission_mode)
 
 
 def _can_run_concurrently(spec: ToolSpec) -> bool:

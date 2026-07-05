@@ -1,0 +1,18 @@
+# Copy this file to .coco-code/mcp.yaml in a project, or to
+# ~/.coco-code/mcp.yaml for user-wide MCP servers.
+# Secrets should be supplied through environment variables.
+
+mcp_servers:
+  context7:
+    type: stdio
+    command: npx
+    args: ["-y", "@upstash/context7-mcp"]
+    env:
+      NODE_OPTIONS: "${MCP_NODE_OPTIONS}"
+
+  github:
+    type: http
+    url: https://api.example.com/mcp
+    headers:
+      Authorization: "Bearer ${GITHUB_TOKEN}"
+      X-Workspace: "${MCP_WORKSPACE}"

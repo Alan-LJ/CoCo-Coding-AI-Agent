@@ -95,4 +95,3 @@ def test_consume_stream_returns_partial_reply_on_error() -> None:
     result = asyncio.run(consume_provider_stream(FakeProvider(), [], on_text))
     assert result.reply == "partial"
     assert isinstance(result.error, RuntimeError)
-

@@ -19,6 +19,7 @@ class FakeTool:
         delay: float = 0,
         fail: bool = False,
         cancel: bool = False,
+        spec_timeout_seconds: float | None = None,
     ) -> None:
         self.ran = False
         self._name = name
@@ -26,6 +27,7 @@ class FakeTool:
         self._delay = delay
         self._fail = fail
         self._cancel = cancel
+        self._spec_timeout_seconds = spec_timeout_seconds
 
     @property
     def spec(self) -> ToolSpec:
@@ -39,6 +41,7 @@ class FakeTool:
                 "additionalProperties": False,
             },
             confirmation=self._confirmation,
+            timeout_seconds=self._spec_timeout_seconds,
         )
 
     async def run(self, params: ToolParams, context: ToolContext) -> ToolResult:  # noqa: ARG002
@@ -99,6 +102,8 @@ def test_executor_returns_rejected_result_without_running_tool() -> None:
     assert result.ok is False
     assert result.data["rejected"] is True
     assert tool.ran is False
+
+
 def test_executor_times_out_confirmation_without_running_tool() -> None:
     tool = FakeTool(confirmation=ConfirmationPolicy.REQUIRED)
     registry = ToolRegistry()
@@ -115,8 +120,9 @@ def test_executor_times_out_confirmation_without_running_tool() -> None:
     )
     result = asyncio.run(executor.execute(ToolCall("1", "fake", {}, "{}")))
     assert result.ok is False
-    assert "确认超时" in (result.error or "")
+    assert "confirmation timed out" in (result.error or "").casefold()
     assert tool.ran is False
+
 
 def test_executor_returns_confirmation_error_without_running_tool() -> None:
     tool = FakeTool(confirmation=ConfirmationPolicy.REQUIRED)
@@ -129,9 +135,8 @@ def test_executor_returns_confirmation_error_without_running_tool() -> None:
     executor = ToolExecutor(registry, ToolContext(workspace=Path.cwd()), confirm)
     result = asyncio.run(executor.execute(ToolCall("1", "fake", {}, "{}")))
     assert result.ok is False
-    assert "工具确认失败" in (result.error or "")
+    assert "confirmation failed" in (result.error or "").casefold()
     assert tool.ran is False
-
 
 
 def test_executor_wraps_unknown_tool_and_exceptions() -> None:
@@ -154,15 +159,13 @@ def test_executor_wraps_unknown_tool_and_exceptions() -> None:
     assert "boom" in (failed.error or "")
 
 
-
-
 def test_executor_rejects_parameters_that_do_not_match_schema() -> None:
     tool = FakeTool()
     result = asyncio.run(
         executor_for(tool).execute(ToolCall("1", "fake", {"extra": 1}, '{"extra":1}'))
     )
     assert result.ok is False
-    assert "未知字段" in (result.error or "")
+    assert "unknown fields" in (result.error or "").casefold()
     assert tool.ran is False
 
 
@@ -175,7 +178,8 @@ def test_executor_rejects_missing_required_parameters() -> None:
     executor = ToolExecutor(registry, ToolContext(workspace=Path.cwd()), confirm)
     result = asyncio.run(executor.execute(ToolCall("1", "ReadFile", {}, "{}")))
     assert result.ok is False
-    assert "缺少必填字段" in (result.error or "")
+    assert "missing required" in (result.error or "").casefold()
+
 
 def test_executor_times_out_tool() -> None:
     tool = FakeTool(delay=1)
@@ -183,7 +187,15 @@ def test_executor_times_out_tool() -> None:
         executor_for(tool, timeout_seconds=0.01).execute(ToolCall("1", "fake", {}, "{}"))
     )
     assert result.ok is False
-    assert "超时" in (result.error or "")
+    assert "execution timed out" in (result.error or "").casefold()
+
+
+def test_executor_uses_tool_specific_timeout_over_context_timeout() -> None:
+    tool = FakeTool(delay=0.05, spec_timeout_seconds=0.2)
+    result = asyncio.run(
+        executor_for(tool, timeout_seconds=0.01).execute(ToolCall("1", "fake", {}, "{}"))
+    )
+    assert result.ok is True
 
 
 def test_executor_propagates_cancelled_error() -> None:

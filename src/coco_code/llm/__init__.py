@@ -22,6 +22,10 @@ class StreamEventType(StrEnum):
 EventType = StreamEventType | str
 
 
+class PromptTooLongError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class StreamEvent:
     type: EventType
@@ -68,6 +72,7 @@ __all__ = [
     "ConversationItem",
     "EventType",
     "Message",
+    "PromptTooLongError",
     "Provider",
     "Role",
     "StreamEvent",

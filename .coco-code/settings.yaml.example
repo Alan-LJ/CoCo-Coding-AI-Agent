@@ -1,0 +1,18 @@
+# CoCo Code permission settings example.
+# Priority: .coco-code/settings.local.yaml > .coco-code/settings.yaml > ~/.coco-code/settings.yaml
+# The local file is ignored by Git and is used for "always allow" choices from the TUI.
+
+# Options: default, acceptEdits, plan, bypassPermissions
+default_mode: default
+
+permissions:
+  # Read-only tools are allowed by default. Allow rules are most useful for writes and shell.
+  allow:
+    - "Bash(git *)"
+    - "Bash(pytest)"
+
+  # Deny rules can also restrict reads, for example sensitive local files.
+  deny:
+    - "Bash(rm *)"
+    - "Read(.env)"
+    - "Write(.env)"

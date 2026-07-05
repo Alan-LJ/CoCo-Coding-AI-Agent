@@ -9,6 +9,8 @@ from coco_code.agent.types import (
     AgentProgress,
     AgentRunRequest,
     AgentStopReason,
+    CompactEvent,
+    CompactPhase,
     StreamTurnResult,
     ToolBatch,
 )
@@ -22,6 +24,8 @@ __all__ = [
     "AgentProgress",
     "AgentRunRequest",
     "AgentStopReason",
+    "CompactEvent",
+    "CompactPhase",
     "StreamTurnResult",
     "ToolBatch",
 ]

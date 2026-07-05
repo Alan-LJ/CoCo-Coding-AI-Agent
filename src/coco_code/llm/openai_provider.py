@@ -13,7 +13,7 @@ from coco_code.conversation import (
     ConversationItem,
     ToolResultItem,
 )
-from coco_code.llm import StreamEvent, StreamEventType
+from coco_code.llm import PromptTooLongError, StreamEvent, StreamEventType
 from coco_code.tools.base import ToolCall, ToolResult
 from coco_code.tools.registry import ToolRegistry
 
@@ -60,6 +60,7 @@ class _BaseOpenAIProvider:
                 "model": self._cfg.model,
                 "messages": self._request_messages(messages),
                 "stream": True,
+                "stream_options": {"include_usage": True},
             }
             if tools is not None:
                 kwargs["tools"] = tools.to_openai_tools()
@@ -67,6 +68,9 @@ class _BaseOpenAIProvider:
             accumulator: dict[int, dict[str, str]] = {}
             for_pending_tool = False
             async for chunk in stream:
+                usage = openai_chunk_usage(chunk)
+                if usage is not None:
+                    yield StreamEvent(type="usage", usage=usage)
                 text = openai_chunk_text(chunk)
                 if text:
                     yield StreamEvent(type=StreamEventType.TEXT_DELTA, text=text)
@@ -82,7 +86,7 @@ class _BaseOpenAIProvider:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            yield StreamEvent(type=StreamEventType.ERROR, error=exc)
+            yield StreamEvent(type=StreamEventType.ERROR, error=wrap_prompt_too_long(exc))
 
     def _request_messages(self, messages: list[ConversationItem]) -> list[Any]:
         return [{"role": "system", "content": self._system_prompt}] + [
@@ -154,11 +158,56 @@ def openai_chunk_text(chunk: Any) -> str:
     return content or ""
 
 
+def openai_chunk_usage(chunk: Any) -> dict[str, int] | None:
+    usage = getattr(chunk, "usage", None)
+    if usage is None:
+        return None
+    return {
+        "input_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+        "output_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+        "cache_read": _nested_usage_int(usage, "prompt_tokens_details", "cached_tokens"),
+        "cache_write": 0,
+    }
+
+
 def openai_finish_reason(chunk: Any) -> str | None:
     choices = getattr(chunk, "choices", None)
     if not choices:
         return None
     return getattr(choices[0], "finish_reason", None)
+
+
+def wrap_prompt_too_long(exc: Exception) -> Exception:
+    if not is_prompt_too_long_error(exc):
+        return exc
+    wrapped = PromptTooLongError(str(exc) or "Prompt is too long.")
+    wrapped.__cause__ = exc
+    return wrapped
+
+
+def is_prompt_too_long_error(exc: Exception) -> bool:
+    code = str(getattr(exc, "code", "") or getattr(exc, "type", "")).casefold()
+    message = str(exc).casefold()
+    return any(
+        marker in f"{code} {message}"
+        for marker in (
+            "context_length_exceeded",
+            "prompt_too_long",
+            "prompt is too long",
+            "context length",
+            "maximum context",
+            "too many tokens",
+        )
+    )
+
+
+def _nested_usage_int(usage: Any, attr: str, nested: str) -> int:
+    details = getattr(usage, attr, None)
+    if details is None:
+        return 0
+    if isinstance(details, dict):
+        return int(details.get(nested, 0) or 0)
+    return int(getattr(details, nested, 0) or 0)
 
 
 def _accumulate_openai_tool_calls(chunk: Any, accumulator: dict[int, dict[str, str]]) -> bool:

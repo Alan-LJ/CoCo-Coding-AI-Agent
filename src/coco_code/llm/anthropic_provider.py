@@ -14,7 +14,7 @@ from coco_code.conversation import (
     ConversationItem,
     ToolResultItem,
 )
-from coco_code.llm import StreamEvent, StreamEventType
+from coco_code.llm import PromptTooLongError, StreamEvent, StreamEventType
 from coco_code.llm.openai_provider import tool_result_payload
 from coco_code.tools.base import ToolCall
 from coco_code.tools.registry import ToolRegistry
@@ -65,6 +65,9 @@ class AnthropicProvider:
             params = self._request_params(messages, tools)
             async with self._client.messages.stream(**params) as stream:
                 async for event in stream:
+                    usage = anthropic_event_usage(event)
+                    if usage is not None:
+                        yield StreamEvent(type="usage", usage=usage)
                     tool_event = accumulator.process(event)
                     if tool_event is not None:
                         pending_tool_event = tool_event
@@ -78,7 +81,7 @@ class AnthropicProvider:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            yield StreamEvent(type=StreamEventType.ERROR, error=exc)
+            yield StreamEvent(type=StreamEventType.ERROR, error=wrap_prompt_too_long(exc))
 
     def _request_params(
         self,
@@ -260,3 +263,44 @@ def map_anthropic_event(event: Any) -> StreamEvent | None:
         return StreamEvent(type=StreamEventType.THINKING_DELTA, text=thinking)
 
     return None
+
+
+def anthropic_event_usage(event: Any) -> dict[str, int] | None:
+    usage = getattr(event, "usage", None)
+    if usage is None:
+        delta = getattr(event, "delta", None)
+        usage = getattr(delta, "usage", None)
+    if usage is None:
+        message = getattr(event, "message", None)
+        usage = getattr(message, "usage", None)
+    if usage is None:
+        return None
+    return {
+        "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+        "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+        "cache_read": int(getattr(usage, "cache_read_input_tokens", 0) or 0),
+        "cache_write": int(getattr(usage, "cache_creation_input_tokens", 0) or 0),
+    }
+
+
+def wrap_prompt_too_long(exc: Exception) -> Exception:
+    if not is_prompt_too_long_error(exc):
+        return exc
+    wrapped = PromptTooLongError(str(exc) or "Prompt is too long.")
+    wrapped.__cause__ = exc
+    return wrapped
+
+
+def is_prompt_too_long_error(exc: Exception) -> bool:
+    error_type = str(getattr(exc, "type", "") or getattr(exc, "code", "")).casefold()
+    message = str(exc).casefold()
+    return any(
+        marker in f"{error_type} {message}"
+        for marker in (
+            "prompt_too_long",
+            "prompt is too long",
+            "context length",
+            "maximum context",
+            "too many tokens",
+        )
+    )

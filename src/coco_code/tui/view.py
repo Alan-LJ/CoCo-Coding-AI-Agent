@@ -8,6 +8,7 @@ from rich.text import Text
 
 from coco_code.agent.types import AgentMode, AgentProgress, AgentStopReason
 from coco_code.config import ProviderConfig
+from coco_code.permission import Mode as PermissionMode
 from coco_code.tools.base import ToolCall, ToolResult, ToolSpec
 from coco_code.tools.safety import summarize_params
 
@@ -24,42 +25,57 @@ def error_block(error: Exception | str) -> Panel:
     return Panel(Text(str(error), style="bold red"), title="Error", border_style="red")
 
 
+def notice_block(message: str) -> Panel:
+    return Panel(Text(message, style="cyan"), title="Notice", border_style="cyan")
+
+
 def tool_call_block(call: ToolCall, spec: ToolSpec | None = None) -> Panel:
     title = f"Tool: {call.name}"
     text = Text()
-    text.append("模型请求调用工具。\n", style="bold yellow")
+    text.append("The model requested a tool call.\n", style="bold yellow")
     if spec is not None:
-        text.append(f"用途：{spec.description}\n", style="white")
-        text.append(f"确认策略：{spec.confirmation.value}\n", style="dim")
+        text.append(f"Purpose: {spec.description}\n", style="white")
+        text.append(f"Confirmation policy: {spec.confirmation.value}\n", style="dim")
         text.append(_tool_metadata_line(spec), style="dim")
         text.append("\n")
-    text.append(f"参数：{summarize_params(call.arguments)}", style="white")
+    text.append(f"Arguments: {summarize_params(call.arguments)}", style="white")
     return Panel(text, title=title, border_style="yellow")
 
 
 def tool_confirm_block(call: ToolCall, spec: ToolSpec) -> Panel:
     text = Text()
-    text.append("等待用户确认后才会执行。\n", style="bold yellow")
-    text.append(f"工具：{call.name}\n", style="white")
-    text.append(f"风险提示：{spec.description}\n", style="red")
+    text.append("Waiting for user confirmation before execution.\n", style="bold yellow")
+    text.append(f"Tool: {call.name}\n", style="white")
+    text.append(f"Risk: {spec.description}\n", style="red")
     text.append(_tool_metadata_line(spec), style="dim")
     text.append("\n")
-    text.append(f"参数：{summarize_params(call.arguments)}", style="white")
+    text.append(f"Arguments: {summarize_params(call.arguments)}", style="white")
     return Panel(text, title="Confirm Tool", border_style="red")
+
+
+def tool_permission_block(call: ToolCall, spec: ToolSpec, reason: str) -> Panel:
+    text = Text()
+    text.append("This tool needs permission before execution.\n", style="bold yellow")
+    text.append(f"Tool: {call.name}\n", style="white")
+    text.append(f"Reason: {reason}\n", style="red")
+    text.append(_tool_metadata_line(spec), style="dim")
+    text.append("\n")
+    text.append(f"Arguments: {summarize_params(call.arguments)}", style="white")
+    return Panel(text, title="Permission Required", border_style="red")
 
 
 def tool_result_block(result: ToolResult) -> Panel:
     style = "green" if result.ok else "red"
     text = Text()
     text.append(result.summary, style=f"bold {style}")
-    text.append(f"\n耗时：{result.elapsed_ms}ms", style="dim")
+    text.append(f"\nElapsed: {result.elapsed_ms}ms", style="dim")
     if result.truncated:
-        text.append("\n输出已截断。", style="yellow")
+        text.append("\nOutput was truncated.", style="yellow")
     if result.error:
-        text.append(f"\n错误：{result.error}", style="red")
+        text.append(f"\nError: {result.error}", style="red")
     output = _tool_result_output(result)
     if output:
-        text.append("\n输出：\n", style="dim")
+        text.append("\nOutput:\n", style="dim")
         text.append(output, style="white")
     return Panel(text, title=f"Tool Result: {result.tool_name}", border_style=style)
 
@@ -71,10 +87,10 @@ def tool_batch_block(
     concurrent: bool = False,
 ) -> Panel:
     text = Text()
-    mode = "并发" if concurrent else "串行"
-    text.append(f"工具批次：{mode}\n", style="bold yellow")
+    mode = "concurrent" if concurrent else "serial"
+    text.append(f"Tool batch: {mode}\n", style="bold yellow")
     if batch_index is not None and batch_total is not None:
-        text.append(f"批次：{batch_index}/{batch_total}\n", style="dim")
+        text.append(f"Batch: {batch_index}/{batch_total}\n", style="dim")
     for call in calls:
         text.append(f"- {call.name}: {summarize_params(call.arguments)}\n", style="white")
     return Panel(text, title="Tool Batch", border_style="yellow")
@@ -82,7 +98,7 @@ def tool_batch_block(
 
 def agent_stop_block(reason: AgentStopReason | str, detail: str = "") -> Panel:
     text = Text()
-    text.append(f"停止原因：{reason}", style="bold cyan")
+    text.append(f"Stop reason: {reason}", style="bold cyan")
     if detail:
         text.append(f"\n{detail}", style="white")
     return Panel(text, title="Agent Stopped", border_style="cyan")
@@ -90,8 +106,11 @@ def agent_stop_block(reason: AgentStopReason | str, detail: str = "") -> Panel:
 
 def second_tool_block(call: ToolCall) -> Panel:
     text = Text()
-    text.append("兼容边界：旧流程不再自动执行第二次工具调用。\n", style="bold yellow")
-    text.append(f"模型请求工具 `{call.name}`。", style="white")
+    text.append(
+        "Compatibility boundary: the old stream path blocks a second tool call.\n",
+        style="bold yellow",
+    )
+    text.append(f"The model requested `{call.name}`.", style="white")
     return Panel(text, title="Tool Boundary", border_style="yellow")
 
 
@@ -112,16 +131,16 @@ def _tool_result_output(result: ToolResult) -> str:
 def _tool_metadata_line(spec: ToolSpec) -> str:
     read_only = str(spec.read_only).lower()
     destructive = str(spec.destructive).lower()
-    scenarios = "、".join(spec.typical_scenarios) if spec.typical_scenarios else "未标注"
+    scenarios = ", ".join(spec.typical_scenarios) if spec.typical_scenarios else "unmarked"
     return (
-        f"元信息：category={spec.category.value}; "
+        f"Metadata: category={spec.category.value}; "
         f"read_only={read_only}; destructive={destructive}; "
         f"typical_scenarios={scenarios}"
     )
 
 
 def status_text(provider: ProviderConfig, message_count: int) -> Text:
-    return mode_status_text(provider, AgentMode.AGENT, message_count, None)
+    return mode_status_text(provider, AgentMode.AGENT, message_count, None, PermissionMode.DEFAULT)
 
 
 def mode_status_text(
@@ -129,15 +148,16 @@ def mode_status_text(
     mode: AgentMode,
     message_count: int,
     progress: AgentProgress | None = None,
+    permission_mode: PermissionMode | None = None,
 ) -> Text:
+    perm = permission_mode or _permission_mode_from_agent_mode(mode)
+    label, style = _permission_label(perm)
     text = Text.assemble(
-        (" Provider ", "bold cyan"),
-        (provider.name, "white"),
-        (" | ", "dim"),
-        (provider.protocol, "yellow"),
+        (" Permission ", "bold cyan"),
+        (f"[{label}]", style),
         (" | Model ", "dim"),
         (provider.model, "white"),
-        (" | Mode ", "dim"),
+        (" | Agent ", "dim"),
         (mode.value, "magenta"),
         (" | Messages ", "dim"),
         (str(message_count), "green"),
@@ -174,3 +194,18 @@ def agent_progress_text(current_reply: str, elapsed: int, progress: AgentProgres
 def streaming_text(current_reply: str, elapsed: int) -> Text:
     return agent_progress_text(current_reply, elapsed, None)
 
+
+def _permission_mode_from_agent_mode(mode: AgentMode) -> PermissionMode:
+    if mode == AgentMode.PLAN:
+        return PermissionMode.PLAN
+    return PermissionMode.DEFAULT
+
+
+def _permission_label(mode: PermissionMode) -> tuple[str, str]:
+    if mode == PermissionMode.ACCEPT_EDITS:
+        return "ACCEPT EDITS", "bold green"
+    if mode == PermissionMode.PLAN:
+        return "PLAN", "bold yellow"
+    if mode == PermissionMode.BYPASS:
+        return "BYPASS", "bold red"
+    return "DEFAULT", "bold cyan"

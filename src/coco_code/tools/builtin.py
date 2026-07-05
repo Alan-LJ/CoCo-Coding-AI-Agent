@@ -544,5 +544,3 @@ def _safe_command_env() -> dict[str, str]:
         "WINDIR",
     }
     return {key: value for key, value in os.environ.items() if key.upper() in allowed_keys}
-
-

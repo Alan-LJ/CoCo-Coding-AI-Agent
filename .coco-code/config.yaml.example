@@ -8,13 +8,19 @@ providers:
   - name: Claude
     protocol: anthropic
     model: claude-sonnet-4-5
+    # Optional; defaults by protocol when omitted. Anthropic default: 200000.
+    context_window: 200000
     thinking: true
 
   - name: OpenAI
     protocol: openai
     model: gpt-5.1
+    # Optional; OpenAI and OpenAI-compatible default: 128000.
+    context_window: 128000
 
   - name: OpenAI Compatible
     protocol: openai-compat
     model: qwen3-coder
     base_url: https://example.com/v1
+    # Optional; OpenAI-compatible default: 128000.
+    context_window: 128000

@@ -26,6 +26,8 @@ htmlcov/
 !.env.example
 .coco-code/*
 !.coco-code/config.yaml.example
+!.coco-code/settings.yaml.example
+.coco-code/settings.local.yaml
 .mew*/
 *.pem
 *.key
@@ -42,3 +44,4 @@ temp/
 TestAgentRun/
 text.txt
 %SystemDrive%/
+.mewcode/sessions/

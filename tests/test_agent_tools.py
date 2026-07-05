@@ -31,7 +31,7 @@ def test_plan_mode_rejects_disallowed_tool() -> None:
     )
     assert result is not None
     assert result.ok is False
-    assert "不允许" in (result.error or "")
+    assert "not allowed" in (result.error or "").casefold()
 
 
 def test_tool_batcher_groups_read_only_and_serializes_side_effects() -> None:

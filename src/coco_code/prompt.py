@@ -39,23 +39,46 @@ SYSTEM_PROMPT = """你是 CoCo Code，一个终端里的 AI 编程助手。
 - 优先使用专用工具：读文件用 ReadFile，写新文件或覆盖文件用 WriteFile。
   精确替换用 EditFile，找文件用 Glob，搜内容用 Grep。
 - 仅在编译、测试、安装依赖、运行项目命令，或专用工具无法完成时使用 Bash。
-- 不要尝试 MCP、长期记忆、交互式 shell 或后台任务。
 
 请用简洁、准确、中文优先的方式回答用户。"""
 
 
-def build_system_prompt(cwd: Path, provider: ProviderConfig) -> str:
-    return "\n".join(
-        [
-            SYSTEM_PROMPT,
-            "",
-            "运行环境：",
-            f"- 当前工作目录：{cwd}",
-            f"- 当前 provider：{provider.name}",
-            f"- 当前协议：{provider.protocol}",
-            f"- 当前模型：{provider.model}",
-        ]
-    )
+def build_system_prompt(
+    cwd: Path,
+    provider: ProviderConfig,
+    instructions: str = "",
+    memory: str = "",
+) -> str:
+    parts = [
+        SYSTEM_PROMPT,
+        "",
+        "运行环境：",
+        f"- 当前工作目录：{cwd}",
+        f"- 当前 provider：{provider.name}",
+        f"- 当前协议：{provider.protocol}",
+        f"- 当前模型：{provider.model}",
+    ]
+    memory = memory.strip()
+    if memory:
+        parts.extend(
+            [
+                "",
+                "长期记忆索引（long-term-memory）：",
+                "以下内容是已沉淀的用户级和项目级记忆索引；需要完整细节时请读取对应笔记文件。",
+                memory,
+            ]
+        )
+    instructions = instructions.strip()
+    if instructions:
+        parts.extend(
+            [
+                "",
+                "项目指令（custom-instructions）：",
+                "以下内容来自项目和用户指令文件；在不冲突核心安全与工具边界时请优先遵循。",
+                instructions,
+            ]
+        )
+    return "\n".join(parts)
 
 
 def render_banner(version: str, cwd: Path, provider: ProviderConfig) -> str:

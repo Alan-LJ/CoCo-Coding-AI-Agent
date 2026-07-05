@@ -235,7 +235,7 @@ def test_plan_mode_rejects_write_file_without_executing(tmp_path: Path) -> None:
             item.result for item in conversation.items() if isinstance(item, ToolResultItem)
         )
         assert result.ok is False
-        assert "不允许" in (result.error or "")
+        assert "not allowed" in (result.error or "").casefold()
 
     asyncio.run(run())
 

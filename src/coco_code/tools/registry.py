@@ -60,6 +60,9 @@ class ToolRegistry:
     def list_specs(self) -> list[ToolSpec]:
         return [tool.spec for tool in self._tools.values()]
 
+    def count(self) -> int:
+        return len(self._tools)
+
     def filtered(self, predicate: Callable[[ToolSpec], bool]) -> ToolRegistry:
         registry = ToolRegistry()
         for tool in self._tools.values():

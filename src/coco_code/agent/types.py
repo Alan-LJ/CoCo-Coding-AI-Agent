@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from coco_code.permission import Mode as PermissionMode
 from coco_code.tools.base import ToolCall, ToolResult
 
 
@@ -36,6 +37,7 @@ class AgentLimits:
 class AgentRunRequest:
     text: str
     mode: AgentMode
+    permission_mode: PermissionMode | None = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,23 @@ class AgentProgress:
     batch_total: int | None = None
 
 
+class CompactPhase(StrEnum):
+    BEFORE_AUTO = "before_auto"
+    AFTER_AUTO = "after_auto"
+    BEFORE_EMERGENCY = "before_emergency"
+    AFTER_EMERGENCY = "after_emergency"
+    MANUAL_DONE = "manual_done"
+
+
+@dataclass(frozen=True)
+class CompactEvent:
+    phase: CompactPhase
+    before_tokens: int = 0
+    after_tokens: int = 0
+    offloaded_results: int = 0
+    error: Exception | str | None = None
+
+
 class AgentEventType(StrEnum):
     MODE_CHANGED = "mode_changed"
     PROGRESS = "progress"
@@ -58,6 +77,7 @@ class AgentEventType(StrEnum):
     TOOL_STARTED = "tool_started"
     TOOL_RESULT = "tool_result"
     USAGE = "usage"
+    COMPACT = "compact"
     ERROR = "error"
     STOPPED = "stopped"
 
@@ -67,6 +87,7 @@ class AgentEvent:
     type: AgentEventType
     text: str = ""
     mode: AgentMode | None = None
+    permission_mode: PermissionMode | None = None
     progress: AgentProgress | None = None
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call: ToolCall | None = None
@@ -74,6 +95,7 @@ class AgentEvent:
     stop_reason: AgentStopReason | None = None
     error: Exception | str | None = None
     usage: dict[str, int] | None = None
+    compact: CompactEvent | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +103,7 @@ class StreamTurnResult:
     reply: str
     tool_calls: tuple[ToolCall, ...] = ()
     error: Exception | None = None
+    usage: dict[str, int] | None = None
 
 
 @dataclass(frozen=True)

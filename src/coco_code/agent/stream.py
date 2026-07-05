@@ -19,9 +19,13 @@ async def collect_stream_turn(
 ) -> StreamTurnResult:
     reply_parts: list[str] = []
     tool_calls: list[ToolCall] = []
+    last_usage: dict[str, int] | None = None
     stream = provider.stream(messages, tools=tools)
 
     async for event in stream:
+        if event.usage is not None:
+            last_usage = event.usage
+            await on_event(AgentEvent(type=AgentEventType.USAGE, usage=event.usage))
         if event.type == StreamEventType.TEXT_DELTA or event.type == "text_delta":
             reply_parts.append(event.text)
             await on_event(AgentEvent(type=AgentEventType.TEXT_DELTA, text=event.text))
@@ -31,12 +35,22 @@ async def collect_stream_turn(
             calls = event.tool_calls or ((event.tool_call,) if event.tool_call is not None else ())
             tool_calls.extend(calls)
             if tool_calls:
-                return StreamTurnResult(reply="".join(reply_parts), tool_calls=tuple(tool_calls))
+                return StreamTurnResult(
+                    reply="".join(reply_parts),
+                    tool_calls=tuple(tool_calls),
+                    usage=last_usage,
+                )
         elif event.type == StreamEventType.ERROR or event.type == "error":
-            return StreamTurnResult(reply="".join(reply_parts), error=event.error)
+            return StreamTurnResult(
+                reply="".join(reply_parts),
+                error=event.error,
+                usage=last_usage,
+            )
         elif event.type == StreamEventType.DONE or event.type == "done":
             break
-        if event.usage is not None:
-            await on_event(AgentEvent(type=AgentEventType.USAGE, usage=event.usage))
 
-    return StreamTurnResult(reply="".join(reply_parts), tool_calls=tuple(tool_calls))
+    return StreamTurnResult(
+        reply="".join(reply_parts),
+        tool_calls=tuple(tool_calls),
+        usage=last_usage,
+    )

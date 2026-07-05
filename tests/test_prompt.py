@@ -40,3 +40,17 @@ def test_banner_contains_version_model_cwd_and_no_key() -> None:
     assert "gpt-test" in banner
     assert str(cwd) in banner
     assert "secret-key" not in banner
+
+
+def test_system_prompt_injects_memory_and_instructions() -> None:
+    provider = ProviderConfig(name="OpenAI", protocol="openai", model="gpt-test")
+    prompt = build_system_prompt(
+        Path("P:/AI/CoCo Code_Agent"),
+        provider,
+        instructions="Project rules",
+        memory="Memory index",
+    )
+    assert "long-term-memory" in prompt
+    assert "custom-instructions" in prompt
+    assert "Memory index" in prompt
+    assert "Project rules" in prompt

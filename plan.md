@@ -1,610 +1,433 @@
-# CoCo Code Agent Loop Plan
+# MCP 客户端 Plan
+
+> 技术栈：Python 3.12+；使用官方 MCP Python SDK `mcp` 承载协议层，配合 `httpx.AsyncClient` 配置 Streamable HTTP headers/timeout。当前仓库包名为 `coco_code`，本章新增 `coco_code.mcp` 子包；provider 适配层和 permission 包源码不为 MCP 增加特殊分支。
 
 ## 架构概览
 
-本章采用“新增 Agent 核心层、收窄 TUI 职责”的方案。现有 `CoCoCodeApp` 里已经承担了 provider 流消费、工具执行、历史写入、确认弹窗和 UI 渲染，导致“一次工具调用后停下”的边界写死在 TUI 内。新方案会新增 `coco_code.agent` 包，把 Agent Loop、停止条件、工具分批、模式过滤、事件流和历史写入放进核心层；TUI 只负责提交用户请求、消费事件、展示文本/工具/进度/停止原因。
+- **mcp 子包（新增）**：集中承载 MCP 客户端能力：两层配置读取与合并、`${VAR}` 展开、字段校验、stdio/Streamable HTTP 连接、initialize/list/call 会话流程、远端工具适配、连接缓存与关闭。该包依赖 `tools` 抽象、官方 MCP SDK、`httpx` 与标准库，不依赖 agent/tui/permission/llm/conversation。
+- **CLI 装配（小改）**：`cli.py` 在解析普通 provider 配置、创建权限引擎后，加载 MCP 配置并把 `McpConfig` 传给 `CoCoCodeApp`。MCP 配置加载失败或 server 定义非法只产生 stderr 告警，不让 CLI 退出。
+- **TUI 启动期装配（小改）**：`CoCoCodeApp` 持有 `McpManager`。在 `on_mount` 的第一阶段 `await manager.start()`，完成所有 server 的连接、握手和列工具，再把 MCP 工具注册进现有 `ToolRegistry`，最后才启用 provider 选择或输入框。这样对用户而言，进入可交互状态时工具集已经稳定。
+- **tools 模块（小改）**：`Tool` 接口保持不变；`ToolSpec` 增加可选 `timeout_seconds` 字段，`ToolExecutor` 优先使用该字段作为外层执行超时。MCP 工具内部仍用 30 秒 `tools/call` 超时并返回 MCP 风格错误；外层超时只做兜底。
+- **permission 包（零改实现）**：MCP 工具通过 `ToolSpec.read_only` 自然进入现有分类。未知工具名在 `friendly_name` 中原样返回，`categorize(..., read_only=True)` 归只读，非只读归执行类；`extract_target` 对未知工具返回非文件目标，黑名单与沙箱自然跳过。规则可直接写 `mcp__<server>__<tool>` 或 `mcp__<server>__*`。
+- **agent / llm / provider（零改）**：Agent 仍通过 registry 获取工具，provider 仍只接收统一 Tool schema 和统一 ToolResult。MCP 来源不进入 provider 协议层。
 
-核心架构分为五层：
+数据流（启动）：
 
-1. `llm` provider 层
-   继续负责 OpenAI / Anthropic 协议差异，但流式工具调用结果从“单个 `ToolCall`”升级为“多个 `ToolCall`”。OpenAI 现有 accumulator 已按 index 收集多个工具调用碎片，只需把最终转换从取第一个改为生成完整列表；Anthropic accumulator 也升级为按 content block 收集多个 `tool_use`。provider 仍输出统一 `StreamEvent`，不关心 Agent Loop。
+```text
+cli.main()
+  ├─ config.load()                         # 既有 provider 配置
+  ├─ permission.new_engine(root)            # 既有权限引擎
+  ├─ mcp.load_config(root)                  # 新：两层 mcp_servers 配置
+  └─ CoCoCodeApp(..., mcp_config)
+       └─ on_mount:
+            ├─ create_default_registry()    # 6 个内置工具
+            ├─ await McpManager.start()     # 每 server 30s，失败隔离
+            ├─ registry.register(mcp_tool)  # 注册成功工具
+            └─ 启用 provider/input
+```
 
-2. `conversation` 会话层
-   继续维护当前会话历史，但需要支持“一条 assistant 响应包含多个工具调用”。计划新增复数工具调用项，保证 OpenAI/Anthropic 回放格式正确：先写 assistant tool calls，再按模型请求顺序写 tool results。这样即使只读工具并发执行，写回历史的顺序也稳定。
+数据流（调用）：
 
-3. `tools` 工具层
-   复用现有 `ToolRegistry`、`ToolExecutor`、`ToolSpec`、确认回调和安全元信息。新增工具过滤与分批执行能力：Plan Mode 根据 `read_only=True` 且 `destructive=False` 过滤工具；同一响应里的只读工具可并发执行，`WriteFile`、`EditFile`、`Bash` 等非只读/破坏性/需确认工具串行执行。确认弹窗仍通过现有 confirm callback 触发，不绕过。
-
-4. `agent` 核心层
-   新增 `AgentLoop` 作为本章主入口。它接收 provider、conversation、tool registry、tool executor、运行限制和本轮模式，产出异步 `AgentEvent` 流。循环逻辑是：请求模型流 → 双路收集文本和工具调用 → 没工具则停止 → 有工具则分批执行 → 结果写回历史 → 继续下一轮，直到模型完成、迭代上限、取消、未知工具上限、流错误或其他停止条件触发。
-
-5. `tui` 展示层
-   `CoCoCodeApp` 不再直接调用 `consume_provider_stream` 和 `_handle_tool_call`。它把用户输入解析成普通 Agent 模式、Plan Mode 或 Do Mode 请求，然后启动 `AgentLoop.run()`，消费事件并调用现有 `view.py` 渲染函数。`view.py` 会补充模式状态、迭代进度、工具批次、停止原因等展示；现有确认弹窗继续保留。
-
-模式设计上，本章只扩展 `/plan` 和 `/do`，不引入完整 slash 命令体系。普通输入使用完整工具集；`/plan` 触发只读计划模式；`/do` 触发执行模式并使用完整工具集。`/plan <任务>` 和 `/do <任务>` 可直接带任务文本；单独输入 `/plan` 或 `/do` 时，Agent 基于当前会话上下文生成计划或执行最近计划。
-
-这一架构覆盖 `F1-F20` 的主线：循环在 `agent`，多工具和协议解析在 `llm`，安全分批与确认在 `tools`，历史顺序在 `conversation`，模式和可观测状态在 `tui`。
+```text
+AgentLoop / ToolExecutor
+  └─ registry.get("mcp__github__create_issue")
+       └─ McpTool.run(params, context)
+            ├─ asyncio.timeout(30s)
+            ├─ session.call_tool(remote_name, arguments=params)
+            ├─ 拼接 TextContent.text
+            ├─ 丢弃非 text 内容块并 stderr 告警
+            └─ ToolResult(ok=not result.is_error, summary=text, error=...)
+```
 
 ## 核心数据结构
 
-### AgentMode
+### McpConfig / ServerConfig
 
 ```python
-class AgentMode(StrEnum):
-    AGENT = "agent"
-    PLAN = "plan"
-    DO = "do"
+from dataclasses import dataclass, field
+from typing import Literal
+
+ServerType = Literal["stdio", "http"]
+
+@dataclass(frozen=True)
+class McpConfig:
+    servers: dict[str, "ServerConfig"] = field(default_factory=dict)
+
+@dataclass(frozen=True)
+class ServerConfig:
+    name: str
+    type: ServerType
+    command: str = ""              # stdio required
+    args: tuple[str, ...] = ()      # stdio optional
+    env: dict[str, str] = field(default_factory=dict)
+    url: str = ""                  # http required
+    headers: dict[str, str] = field(default_factory=dict)
 ```
 
-表示当前运行模式。普通输入走 `AGENT`；`/plan` 走 `PLAN`，只下发只读非破坏性工具；`/do` 走 `DO`，下发完整工具集。
+说明：`ServerConfig` 是配置加载后的归一化结果，已经完成两层合并、`${VAR}` 展开和字段校验。非法 server 不进入 `McpConfig.servers`。
 
-### AgentStopReason
+### ManagedSession
 
 ```python
-class AgentStopReason(StrEnum):
-    MODEL_DONE = "model_done"
-    ITERATION_LIMIT = "iteration_limit"
-    USER_CANCELLED = "user_cancelled"
-    UNKNOWN_TOOL_LIMIT = "unknown_tool_limit"
-    STREAM_ERROR = "stream_error"
-    TOOL_ERROR = "tool_error"
-    RUNTIME_ABORT = "runtime_abort"
+from contextlib import AsyncExitStack
+from dataclasses import dataclass
+from typing import Any
+
+@dataclass
+class ManagedSession:
+    server_name: str
+    session: Any              # 实际为 mcp.ClientSession；测试中可替换为 stub
+    stack: AsyncExitStack     # 持有 stdio/http transport、ClientSession、httpx client 的 async context
 ```
 
-统一描述停止原因。TUI 只展示这个语义结果，不自己推断为什么停。
+说明：Python SDK 的 stdio/http transport 和 `ClientSession` 都通过 async context 管理。`AsyncExitStack` 让每个 server 的生命周期可以统一关闭；启动失败时也能关闭已经进入的上下文。
 
-### AgentLimits
+### McpManager
+
+```python
+class McpManager:
+    def __init__(self, config: McpConfig, version: str, *, stderr: TextIO = sys.stderr) -> None: ...
+
+    async def start(self) -> None: ...
+    def tools(self) -> list[Tool]: ...
+    async def close(self) -> None: ...
+```
+
+字段：
+- `_config: McpConfig`：已校验配置。
+- `_sessions: dict[str, ManagedSession]`：成功连接的 server。
+- `_tools: list[McpTool]`：已适配好的远端工具。
+- `_started: bool` / `_closed: bool`：防止重复启动或重复关闭。
+- `_stderr: TextIO`：统一告警出口，测试可注入 `io.StringIO`。
+
+### McpTool
+
+```python
+@dataclass
+class McpTool:
+    full_name: str                 # mcp__<server>__<tool>
+    server_name: str
+    remote_name: str               # server 原始工具名
+    description: str
+    parameters_schema: dict[str, Any]
+    read_only: bool
+    caller: McpCaller
+    stderr: TextIO = sys.stderr
+```
+
+`McpTool` 实现现有 `Tool` 协议：
+
+```python
+@property
+def spec(self) -> ToolSpec: ...
+
+async def run(self, params: ToolParams, context: ToolContext) -> ToolResult: ...
+```
+
+### McpCaller
+
+```python
+class McpCaller(Protocol):
+    async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any: ...
+```
+
+说明：生产环境中 `caller` 是 SDK `ClientSession`；单元测试中注入 fake caller，避免测试依赖真实子进程或网络。
+
+## 核心接口
+
+### `coco_code.mcp.config`
+
+```python
+def default_mcp_config_paths(root: Path) -> tuple[Path, Path]: ...
+
+def load_config(root: Path, *, stderr: TextIO = sys.stderr) -> McpConfig: ...
+
+def expand_vars(value: str, *, server_name: str, stderr: TextIO) -> str: ...
+```
+
+路径决策：本仓库落地为两个独立 MCP 配置文件：
+
+```text
+~/.coco-code/mcp.yaml
+<root>/.coco-code/mcp.yaml
+```
+
+两者都使用顶层 `mcp_servers` map。选择独立 `mcp.yaml` 是为了保持 MCP 的“配置非法只跳过并告警”语义，不改变现有 `config.yaml` 对 provider 配置的强校验/启动失败行为。仍然只合并用户级和项目级两层，不读取 `.coco-code/config.local.yaml` 或任何本地层。
+
+配置示例：
+
+```yaml
+mcp_servers:
+  github:
+    type: http
+    url: https://example.com/mcp
+    headers:
+      Authorization: Bearer ${GITHUB_TOKEN}
+  local_math:
+    type: stdio
+    command: python
+    args: ["-m", "examples.math_server"]
+    env:
+      API_KEY: ${LOCAL_MCP_API_KEY}
+```
+
+### `coco_code.mcp.manager`
+
+```python
+STARTUP_TIMEOUT_SECONDS = 30.0
+CLOSE_TIMEOUT_SECONDS = 5.0
+
+class McpManager:
+    async def start(self) -> None:
+        """并发启动所有 server；单 server 失败只告警并跳过。"""
+
+    def tools(self) -> list[Tool]:
+        """返回按 server 名、远端工具名稳定排序的工具。"""
+
+    async def close(self) -> None:
+        """并发关闭所有 ManagedSession，总超时 5 秒。"""
+```
+
+内部辅助接口：
+
+```python
+async def connect_server(config: ServerConfig, version: str, stderr: TextIO) -> ManagedSession: ...
+async def connect_stdio(config: ServerConfig, version: str, stderr: TextIO) -> ManagedSession: ...
+async def connect_http(config: ServerConfig, version: str, stderr: TextIO) -> ManagedSession: ...
+def merge_env(extra: Mapping[str, str]) -> dict[str, str]: ...
+```
+
+### `coco_code.mcp.tool`
+
+```python
+CALL_TIMEOUT_SECONDS = 30.0
+OUTER_EXECUTOR_TIMEOUT_SECONDS = 31.0
+TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+def adapt_tool(server_name: str, remote_tool: Any, caller: McpCaller, *, stderr: TextIO) -> McpTool | None: ...
+
+def tool_full_name(server_name: str, remote_name: str) -> str: ...
+
+def normalize_input_schema(raw_schema: Any) -> dict[str, Any]: ...
+
+def remote_read_only(remote_tool: Any) -> bool: ...
+```
+
+`adapt_tool` 同时兼容 SDK 模型字段的 snake_case / camelCase 形态，例如 `input_schema` 与 `inputSchema`、`read_only_hint` 与 `readOnlyHint`。如果 SDK 版本只暴露其中一种，代码路径仍稳定。
+
+### `tools` 小改接口
 
 ```python
 @dataclass(frozen=True)
-class AgentLimits:
-    max_iterations: int = 8
-    unknown_tool_limit: int = 2
-    response_timeout_seconds: float = 300.0
-    tool_timeout_seconds: float = 10.0
-    confirm_timeout_seconds: float = 60.0
-    read_tool_concurrency: int = 4
+class ToolSpec:
+    ...
+    timeout_seconds: float | None = None
 ```
 
-本章先提供代码层默认值，后续再接配置文件。`tool_timeout_seconds` 和 `confirm_timeout_seconds` 会同步写入 `ToolContext`，避免 TUI 和工具层各自维护一套边界。
-
-### AgentRunRequest
+`ToolExecutor.execute` 的外层等待改为：
 
 ```python
-@dataclass(frozen=True)
-class AgentRunRequest:
-    text: str
-    mode: AgentMode
+timeout = spec.timeout_seconds or context.timeout_seconds
+result = await asyncio.wait_for(tool.run(...), timeout=timeout)
 ```
 
-TUI 把用户输入解析成这个请求后交给 Agent。`/plan xxx` 会变成 `mode=PLAN, text=xxx`；`/do xxx` 会变成 `mode=DO, text=xxx`。
-
-### StreamTurnResult
-
-```python
-@dataclass(frozen=True)
-class StreamTurnResult:
-    reply: str
-    tool_calls: tuple[ToolCall, ...] = ()
-    error: Exception | None = None
-```
-
-替代当前 TUI 的 `StreamResult.tool_call` 单数结构。它由新的流式收集器生成：文本增量实时发事件，完整 reply 和全部 tool calls 留给 Agent Loop 判断下一步。
-
-### AgentEventType
-
-```python
-class AgentEventType(StrEnum):
-    MODE_CHANGED = "mode_changed"
-    PROGRESS = "progress"
-    TEXT_DELTA = "text_delta"
-    ASSISTANT_MESSAGE = "assistant_message"
-    TOOL_CALLS = "tool_calls"
-    TOOL_BATCH_STARTED = "tool_batch_started"
-    TOOL_STARTED = "tool_started"
-    TOOL_RESULT = "tool_result"
-    USAGE = "usage"
-    ERROR = "error"
-    STOPPED = "stopped"
-```
-
-事件是 Agent 和 TUI 的边界。TUI 根据事件渲染历史区、流式区、状态栏和停止原因。
-
-### AgentEvent
-
-```python
-@dataclass(frozen=True)
-class AgentEvent:
-    type: AgentEventType
-    text: str = ""
-    mode: AgentMode | None = None
-    progress: AgentProgress | None = None
-    tool_calls: tuple[ToolCall, ...] = ()
-    tool_call: ToolCall | None = None
-    tool_result: ToolResult | None = None
-    stop_reason: AgentStopReason | None = None
-    error: Exception | str | None = None
-    usage: dict[str, int] | None = None
-```
-
-先用一个统一事件结构，避免为每种事件建很多小类。测试可以直接断言事件序列。
-
-### AgentProgress
-
-```python
-@dataclass(frozen=True)
-class AgentProgress:
-    iteration: int
-    max_iterations: int
-    phase: str
-    tool_name: str | None = None
-    batch_index: int | None = None
-    batch_total: int | None = None
-```
-
-用于展示“第几轮、正在等模型、正在执行哪个工具、当前批次”等状态。
-
-### AgentLoop
-
-```python
-class AgentLoop:
-    def __init__(
-        self,
-        provider: Provider,
-        conversation: Conversation,
-        registry: ToolRegistry,
-        executor: ToolExecutor,
-        limits: AgentLimits,
-    ) -> None: ...
-
-    async def run(self, request: AgentRunRequest) -> AsyncIterator[AgentEvent]: ...
-```
-
-`AgentLoop.run()` 是本章主入口。它负责添加用户消息、循环请求 provider、执行工具、写回历史，并持续产出事件。
-
-### ToolBatcher
-
-```python
-class ToolBatcher:
-    def build_batches(
-        self,
-        calls: Sequence[ToolCall],
-        registry: ToolRegistry,
-        mode: AgentMode,
-    ) -> list[ToolBatch]: ...
-```
-
-`ToolBatcher` 根据工具元信息分批：只读非破坏性工具可并发；非只读、破坏性或需要确认的工具单独串行批次。Plan Mode 的不允许工具会转成结构化错误结果，不执行。
-
-### ToolBatch
-
-```python
-@dataclass(frozen=True)
-class ToolBatch:
-    calls: tuple[ToolCall, ...]
-    concurrent: bool
-```
-
-并发批次只用于只读工具。副作用工具永远 `concurrent=False`，并按模型请求顺序执行。
-
-### StreamEvent
-
-Provider 层同步调整：
-
-```python
-@dataclass(frozen=True)
-class StreamEvent:
-    type: EventType
-    text: str = ""
-    tool_call: ToolCall | None = None
-    tool_calls: tuple[ToolCall, ...] = ()
-    error: Exception | None = None
-    usage: dict[str, int] | None = None
-```
-
-保留 `tool_call` 兼容旧代码，但 Agent 新逻辑只读 `tool_calls`；旧单工具 provider 可以填单元素 tuple。
+MCP 工具的 `ToolSpec.timeout_seconds` 设置为 `31.0`，使 `McpTool.run` 内部 30 秒超时先返回结构化 MCP 错误；31 秒只是兜底，避免 SDK/transport 异常卡住。
 
 ## 模块设计
 
-### `coco_code.agent.types`
+### `src/coco_code/mcp/config.py`
 
-**职责：** 定义 Agent Loop 的公共类型，作为核心层、TUI、测试之间的稳定契约。
+**职责：** 读取两层 MCP YAML、合并、展开变量、校验 server 定义。
 
-**对外接口：** `AgentMode`、`AgentStopReason`、`AgentLimits`、`AgentRunRequest`、`AgentProgress`、`AgentEventType`、`AgentEvent`、`StreamTurnResult`、`ToolBatch`。
+**关键实现：**
+- `load_file(path)`：文件不存在返回 `{}`；YAML 解析失败、顶层非 map、`mcp_servers` 非 map 时返回空并 stderr 告警，不抛给 CLI。
+- `merge_servers(user, project)`：先复制用户级，再用项目级同名 server 完整覆盖；不做字段级合并。
+- `expand_vars`：正则 `\$\{([A-Za-z_][A-Za-z0-9_]*)\}`。只作用于 `env` 和 `headers` 的值；未定义变量替换为空字符串，并输出 `[mcp] warn: server <name> references undefined env var ${VAR}`，不输出任何实际值。
+- `validate_server(name, raw)`：要求 `type` 为 `stdio` 或 `http`；`stdio.command` 必填字符串；`stdio.args` 必须是字符串数组；`stdio.env` 必须是字符串 map；`http.url` 必填字符串；`http.headers` 必须是字符串 map。非法时跳过该 server 并告警。
+- `redact_for_log`：只输出字段名、server 名和错误原因，不输出 env/header 值。
 
-**依赖：** 只依赖标准库、`coco_code.tools.base`。不依赖 Textual/Rich。
+### `src/coco_code/mcp/manager.py`
 
-### `coco_code.agent.stream`
+**职责：** 启动 server、建立 SDK 会话、列工具、缓存连接、关闭连接。
 
-**职责：** 替代当前 `coco_code.tui.stream.consume_provider_stream`，负责消费 provider 的流式事件，并完成“双路收集”。
+**关键实现：**
+- `start()` 用 `asyncio.gather(..., return_exceptions=True)` 并发启动每个 server。每个 `_start_one` 外层包 `asyncio.timeout(30)`，确保连接 + initialize + `list_tools` 总时长受限。
+- stdio 连接使用官方 SDK：`StdioServerParameters(command=..., args=..., env=merge_env(...))`，`stdio_client(params)`，`ClientSession(read, write)`，随后 `await session.initialize()` 和 `await session.list_tools()`。
+- HTTP 连接使用官方 SDK当前推荐方式：创建 `httpx.AsyncClient(headers=server.headers, timeout=httpx.Timeout(30.0), follow_redirects=True)`，再传给 `streamable_http_client(url=server.url, http_client=http_client)`，随后进入 `ClientSession` 并 initialize/list_tools。`httpx.AsyncClient` 由 `AsyncExitStack` 托管关闭。
+- `list_tools` 成功后逐个调用 `adapt_tool`。非法工具名、重复工具名只跳过对应工具并告警；同一 server 的其他工具继续注册。
+- `_tools` 排序键为 `(server_name, remote_name)`，保证 provider 看到的工具列表稳定。
+- `close()` 并发关闭每个 session 的 `AsyncExitStack`，外层 `asyncio.timeout(5)`；超时后告警并返回，不阻塞程序退出。
 
-**对外接口：**
+### `src/coco_code/mcp/tool.py`
 
-```python
-async def collect_stream_turn(
-    provider: Provider,
-    messages: list[ConversationItem],
-    tools: ToolRegistry | None,
-    on_event: Callable[[AgentEvent], Awaitable[None]],
-) -> StreamTurnResult: ...
-```
+**职责：** 把 MCP 远端工具包装成现有 `Tool`。
 
-**行为：**
-- 收到 `TEXT_DELTA` 时，立刻发出 `AgentEvent(TEXT_DELTA)`，同时累积完整 reply。
-- 收到 `THINKING_DELTA` 时丢弃，不进入 UI，不进入历史。
-- 收到 `TOOL_CALL` 时收集全部 `tool_calls`，不只取第一个。
-- 收到 `ERROR` 时返回 `StreamTurnResult(error=...)`。
-- 收到 `DONE` 时返回完整结果。
+**关键实现：**
+- `tool_full_name("github", "create_issue")` 生成 `mcp__github__create_issue`。
+- 拼接后的名称必须匹配 `^[A-Za-z0-9_-]+$`；否则 `adapt_tool` 返回 `None` 并告警。
+- `description` 优先用远端描述；为空时兜底为 `MCP tool <tool> from server <server>`。
+- `parameters_schema` 透传远端 `inputSchema/input_schema`；无法转成 dict 时兜底为 `{"type": "object", "properties": {}}`。
+- `read_only` 只在远端 `annotations.readOnlyHint == true` 或 `annotations.read_only_hint == true` 时为 True；其他情况一律 False。
+- `ToolSpec.confirmation`：只读 MCP 工具为 `ConfirmationPolicy.NEVER`；非只读 MCP 工具为 `ConfirmationPolicy.REQUIRED`，作为无 permission engine 时的安全兜底。有 permission engine 时仍由规则/模式/人在回路决定。
+- `ToolSpec.category` 使用 `ToolCategory.GENERAL`；权限分类依赖 `read_only` 和未知工具默认执行类，不依赖 category。
+- `run()` 内部用 `asyncio.timeout(30)` 包裹 `caller.call_tool(remote_name, params or None)`。
+- 成功结果：遍历 `result.content`，只收集 `TextContent.text` 或等价 `type == "text"` 且有 `text` 字段的块；文本按顺序用换行拼接。
+- 非 text 块：计数并通过包级 `set`/`Lock` 对每个 `full_name` 只告警一次，避免刷屏。
+- `result.is_error` 为 True 时返回 `ToolResult(ok=False, error=text or "MCP tool returned an error.")`；否则 `ok=True`。
+- SDK 异常、连接断开、协议错误、超时都转换为 `ToolResult(ok=False, summary="MCP tool call failed: ...", error=...)`，不抛出到 Agent Loop。
 
-**依赖：** `Provider`、`ConversationItem`、`ToolRegistry`、`AgentEvent`。
+### `src/coco_code/tools/base.py` / `executor.py`
 
-### `coco_code.agent.tools`
+**职责：** 支持 per-tool 外层超时。
 
-**职责：** 工具过滤、未知工具处理、多工具分批和执行调度。
+**关键实现：**
+- `ToolSpec` 增加 `timeout_seconds: float | None = None`，默认不改变内置工具行为。
+- `ToolExecutor.execute` 使用 `spec.timeout_seconds or context.timeout_seconds`。
+- 现有内置工具不设置该字段，仍使用 `ToolContext.timeout_seconds` 默认 10 秒。
+- MCP 工具设置 31 秒，确保内部 30 秒超时能按 spec 回灌 MCP 错误。
 
-**对外接口：**
+### `src/coco_code/cli.py`
 
-```python
-def registry_for_mode(registry: ToolRegistry, mode: AgentMode) -> ToolRegistry: ...
+**职责：** 加载 MCP 配置并传入 App。
 
-def validate_tool_allowed(
-    call: ToolCall,
-    registry: ToolRegistry,
-    mode: AgentMode,
-) -> ToolResult | None: ...
+**关键实现：**
+- `root = Path.cwd().resolve()` 之后调用 `mcp_config = load_mcp_config(root)`。
+- `CoCoCodeApp(..., mcp_config=mcp_config)`。
+- MCP 配置加载函数不抛 `ConfigError`，因此不会改变 provider 配置失败时退出、MCP 配置失败时降级的边界。
 
-class ToolBatcher:
-    def build_batches(
-        self,
-        calls: Sequence[ToolCall],
-        registry: ToolRegistry,
-        mode: AgentMode,
-    ) -> list[ToolBatch]: ...
+### `src/coco_code/tui/app.py`
 
-async def execute_tool_batches(
-    batches: Sequence[ToolBatch],
-    executor: ToolExecutor,
-    on_event: Callable[[AgentEvent], Awaitable[None]],
-    concurrency_limit: int,
-) -> list[ToolResult]: ...
-```
+**职责：** 在 Textual 事件循环内启动和关闭 MCP Manager，并注册工具。
 
-**行为：**
-- `registry_for_mode` 基于 `ToolSpec.read_only`、`ToolSpec.destructive`、`ToolSpec.category` 和 `ToolSpec.confirmation` 过滤工具。
-- Plan Mode 只保留只读、非破坏性、无需确认的工具。
-- 未知工具或当前模式不允许工具返回结构化 `ToolResult`，不执行真实工具。
-- 多个只读工具组成并发批次，结果按原请求顺序返回。
-- 副作用工具拆成单工具串行批次，保持模型请求顺序。
-- `ToolExecutor.execute()` 仍负责参数校验、确认弹窗、超时和异常包装。
+**关键实现：**
+- `CoCoCodeApp.__init__` 新增 `mcp_config: McpConfig | None = None`、`mcp_manager: McpManager | None = None` 参数，测试可注入已构造 manager 或空配置。
+- `on_mount` 改为 async：先 `await self.start_mcp()`，再按现有逻辑激活单 provider 或启用 provider 选择。
+- `start_mcp()`：若配置为空直接返回；否则构造 `McpManager(mcp_config, __version__)` 并 `await start()`；把 `manager.tools()` 逐个 `registry.register`。注册异常只告警并跳过，不影响其他工具。
+- 启动期间输入框保持 disabled，history 可写入简短 Notice，如 `Loading MCP tools...` 和失败摘要。
+- `request_quit` / `action_quit` / 退出清理路径确保调用 `await mcp_manager.close()`；若正在 streaming，先取消当前任务，再关闭 MCP。
 
-**依赖：** `ToolRegistry`、`ToolExecutor`、`ToolSpec`、`ToolCall`、`ToolResult`。
+### `pyproject.toml`
 
-### `coco_code.agent.loop`
+**职责：** 声明运行时依赖。
 
-**职责：** 实现 ReAct 风格 Agent Loop 主流程。
-
-**对外接口：**
-
-```python
-class AgentLoop:
-    async def run(self, request: AgentRunRequest) -> AsyncIterator[AgentEvent]: ...
-```
-
-**行为：**
-- 开始时把用户文本写入 `Conversation.add_user()`。
-- 根据模式选择工具 registry，并向 provider 下发对应工具列表。
-- 每次迭代发出 `PROGRESS` 事件，包含当前迭代序号、最大迭代数、阶段。
-- 调用 `collect_stream_turn()` 获取本轮完整 assistant 文本和工具调用列表。
-- 有 assistant 文本时写入历史并发出 `ASSISTANT_MESSAGE`。
-- 没有工具调用时以 `MODEL_DONE` 停止。
-- 有工具调用时写入 assistant tool calls，执行工具批次，按请求顺序写入 tool results，然后进入下一轮。
-- 达到 `max_iterations` 时停止并发出 `STOPPED(iteration_limit)`。
-- 连续未知工具或不允许工具达到上限时停止。
-- 流式错误时停止并发出 `ERROR` 和 `STOPPED(stream_error)`。
-- 捕获 `CancelledError`，发出 `STOPPED(user_cancelled)` 后向外传播或安全结束。
-
-**依赖：** `Provider`、`Conversation`、`ToolRegistry`、`ToolExecutor`、`agent.stream`、`agent.tools`。
-
-### `coco_code.conversation`
-
-**职责：** 保存协议可回放的会话历史。
-
-**调整：**
-- 新增 `AssistantToolCallsItem`，可承载一组 `ToolCall`。
-- 保留 `AssistantToolCallItem` 兼容旧测试和旧调用点。
-- 新增 `Conversation.add_tool_calls(calls: Sequence[ToolCall])`。
-- `items()` 返回包括多工具调用项在内的完整历史。
-- `messages()` 仍只返回用户/助手纯文本消息，保持旧兼容。
-
-**依赖：** `ToolCall`、`ToolResult`。
-
-### `coco_code.llm`
-
-**职责：** 继续提供协议无关 provider 接口和流事件。
-
-**调整：**
-- `StreamEvent` 新增 `tool_calls: tuple[ToolCall, ...]` 和可选 `usage`。
-- `StreamEvent.tool_call` 保留兼容，但新逻辑优先读 `tool_calls`。
-- OpenAI provider 的 `_openai_tool_event()` 改为 `_openai_tool_calls_event()`，从 accumulator 中按 index 生成全部 `ToolCall`。
-- Anthropic provider 的 accumulator 改为支持多个 `tool_use` block，按 block 顺序生成全部 `ToolCall`。
-- OpenAI/Anthropic 的历史回放函数支持 `AssistantToolCallsItem`。
-
-**依赖：** `ConversationItem`、`ToolRegistry`、`ToolCall`。
-
-### `coco_code.tui.app`
-
-**职责：** 处理用户输入、provider 选择、确认弹窗、渲染 AgentEvent。
-
-**调整：**
-- 移除 `_handle_tool_call()` 和 `_stream_final_reply()` 里的“一次工具调用”边界。
-- `submit_user_text()` 解析 `/plan`、`/do`、普通输入，生成 `AgentRunRequest`。
-- 启动 `AgentLoop.run()`，消费事件并调用 `view.py` 渲染。
-- 维护当前 mode、当前 progress、当前 streaming reply。
-- 取消任务时调用当前 Agent task 的 cancel，恢复输入框和状态栏。
-- 保留 `confirm_tool_call()`，由 `ToolExecutor` 通过 callback 调用。
-
-**依赖：** `AgentLoop`、`AgentEvent`、`ToolExecutor`、Textual widgets、`view.py`。
-
-### `coco_code.tui.view`
-
-**职责：** 继续提供 Rich/Textual 展示块。
-
-**调整：**
-- 新增 `agent_progress_text(progress, elapsed)`。
-- 新增 `agent_stop_block(reason, detail)`。
-- 新增 `mode_status_text(provider, mode, message_count, progress)`。
-- 新增 `tool_batch_block(batch_index, batch_total, calls, concurrent)`。
-- `second_tool_block()` 保留但不再作为正常流程使用，只用于兼容旧测试或异常边界。
-
-### `tests`
-
-**职责：** 用 fake provider / fake tool / fake confirm 覆盖 Agent 核心，无需真实 API。
-
-**新增/调整：**
-- 新增 `tests/test_agent_loop.py`：多轮工具调用、停止条件、取消、未知工具。
-- 新增 `tests/test_agent_tools.py`：模式过滤、分批、只读并发、副作用串行。
-- 调整 `tests/test_llm_tool_events.py`：多工具解析和历史回放。
-- 调整 `tests/test_tui_app.py` / `tests/test_tui_tools.py`：TUI 消费事件、模式状态、确认弹窗不退化。
-- 继续使用 `.codeagent` 虚拟环境运行 `pytest`、`ruff check`、`mypy`。
+**新增依赖：**
+- `mcp>=1.12.4`：官方 MCP Python SDK。
+- `httpx>=0.27.0`：显式使用 `httpx.AsyncClient` 配置 Streamable HTTP headers/timeout；即使 SDK 间接依赖，也作为直接依赖声明。
 
 ## 模块交互
 
-### 普通 Agent 模式数据流
-
 ```text
-用户输入
-  → TUI 解析为 AgentRunRequest(mode=AGENT)
-  → AgentLoop.run()
-  → Conversation.add_user()
-  → registry_for_mode(AGENT) 返回完整工具集
-  → collect_stream_turn(provider, conversation.items(), tools)
-      → TEXT_DELTA 立即转成 AgentEvent.TEXT_DELTA 给 TUI
-      → DONE / TOOL_CALL / ERROR 被收集成 StreamTurnResult
-  → 如果无工具调用：
-      → Conversation.add_assistant(reply)
-      → AgentEvent.ASSISTANT_MESSAGE
-      → AgentEvent.STOPPED(MODEL_DONE)
-  → 如果有工具调用：
-      → Conversation.add_tool_calls(calls)
-      → AgentEvent.TOOL_CALLS
-      → ToolBatcher.build_batches()
-      → execute_tool_batches()
-      → Conversation.add_tool_result(result) 按原始顺序写入
-      → 进入下一次迭代
+配置阶段
+  cli.py
+    ├─ config.load()                         # 现有 provider 配置，强校验
+    ├─ permission.new_engine(root)            # 现有权限配置
+    ├─ mcp.config.load_config(root)           # 新 MCP 配置，降级告警
+    └─ CoCoCodeApp(config, permission_engine, mcp_config)
+
+TUI 启动阶段
+  CoCoCodeApp.on_mount()
+    ├─ await start_mcp()
+    │    ├─ McpManager.start()
+    │    ├─ connect stdio/http server
+    │    ├─ initialize + list_tools
+    │    └─ adapt_tool -> McpTool
+    ├─ registry.register(McpTool...)
+    └─ activate_provider / enable input
+
+工具调用阶段
+  AgentLoop -> ToolExecutor.execute(call, permission_mode)
+    ├─ registry.get(call.name).spec
+    ├─ permission_engine.check(mode, call, spec)
+    │    ├─ MCP read_only=True  -> Category.READ -> default allow
+    │    └─ MCP read_only=False -> Category.EXEC -> default/acceptEdits ask
+    ├─ confirm_permission_call if Ask
+    └─ McpTool.run(params, context)
+         └─ ClientSession.call_tool(remote_name, params)
+
+退出阶段
+  CoCoCodeApp.action_quit()
+    ├─ cancel current stream task if any
+    ├─ await McpManager.close() with 5s cap
+    └─ exit Textual app
 ```
 
-这一条链路解决当前“一次工具后就停”的问题：工具结果写回历史后，AgentLoop 会继续请求 provider，而不是强制进入最终回复模式。
-
-### Plan Mode 数据流
+依赖方向：
 
 ```text
-用户输入 /plan 修复某问题
-  → TUI 解析为 AgentRunRequest(mode=PLAN, text="修复某问题")
-  → AgentEvent.MODE_CHANGED(PLAN)
-  → registry_for_mode(PLAN)
-      只保留 read_only=True 且 destructive=False 且 confirmation=NEVER 的工具
-  → 模型只能看到 ReadFile / Glob / Grep 等只读工具
-  → AgentLoop 正常循环读取/搜索
-  → 模型输出计划文本
-  → AgentEvent.STOPPED(MODEL_DONE)
+cli -> mcp.config
+app -> mcp.manager -> mcp.tool -> tools.base
+mcp.manager -> official mcp SDK + httpx
+ToolExecutor -> ToolSpec.timeout_seconds
+permission / llm / provider / conversation 不依赖 mcp
 ```
-
-如果模型在 Plan Mode 请求 `WriteFile`、`EditFile`、`Bash` 或其他不允许工具，`validate_tool_allowed()` 返回结构化错误结果，写回历史；连续达到上限后以 `UNKNOWN_TOOL_LIMIT` 停止。
-
-### Do Mode 数据流
-
-```text
-用户输入 /do
-  → TUI 解析为 AgentRunRequest(mode=DO)
-  → AgentEvent.MODE_CHANGED(DO)
-  → registry_for_mode(DO) 返回完整工具集
-  → 模型基于最近计划和会话上下文继续执行
-  → 写文件、改文件、Bash 调用仍进入 ToolExecutor.confirm
-  → TUI 弹出确认
-  → 批准后执行，拒绝则写回拒绝结果
-  → AgentLoop 根据结果继续下一轮或停止
-```
-
-`/do` 不保存跨会话计划，也不引入新的计划数据库。它只利用当前会话历史，所以实现范围保持克制。
-
-### 多工具调用执行流
-
-```text
-一次模型响应返回 calls = [Glob, Grep, EditFile, Bash]
-  → AgentLoop 收集全部 calls
-  → Conversation.add_tool_calls(calls)
-  → ToolBatcher 生成批次：
-      Batch 1: [Glob, Grep], concurrent=True
-      Batch 2: [EditFile], concurrent=False
-      Batch 3: [Bash], concurrent=False
-  → Batch 1 并发执行，但结果按 [Glob, Grep] 顺序返回和写入
-  → Batch 2 弹确认，批准后执行
-  → Batch 3 弹确认，批准后执行
-  → 全部结果按原始请求顺序写入 Conversation
-  → 下一次 AgentLoop 迭代
-```
-
-并发只影响执行速度，不影响历史顺序。副作用工具不会并发。
-
-### 停止条件流
-
-```text
-每轮迭代开始
-  → 检查 iteration <= max_iterations
-  → 请求 provider
-  → provider 出错：ERROR + STOPPED(STREAM_ERROR)
-  → provider 完成且无工具：STOPPED(MODEL_DONE)
-  → provider 请求工具：
-      → 未知/不允许工具计数增加
-      → 达到 unknown_tool_limit：STOPPED(UNKNOWN_TOOL_LIMIT)
-      → 否则执行工具并继续
-  → 用户取消：
-      → cancel 当前 Agent task
-      → STOPPED(USER_CANCELLED)
-      → TUI 恢复输入
-  → 达到 max_iterations：
-      → STOPPED(ITERATION_LIMIT)
-```
-
-这样所有停止都有事件和可见原因，避免再次出现无限 `Imagining...`。
-
-### TUI 渲染流
-
-```text
-AgentEvent.TEXT_DELTA
-  → 更新 #stream，显示当前流式文本 + Imagining 秒数
-
-AgentEvent.ASSISTANT_MESSAGE
-  → 写入 history，使用 markdown 定型展示
-
-AgentEvent.TOOL_CALLS
-  → 对每个工具调用写入 Tool 面板
-
-AgentEvent.TOOL_BATCH_STARTED / TOOL_STARTED
-  → 更新进度区和历史区摘要
-
-AgentEvent.TOOL_RESULT
-  → 写入 Tool Result 面板
-
-AgentEvent.ERROR
-  → 写入 Error 面板
-
-AgentEvent.STOPPED
-  → 写入停止原因，清空 stream，恢复输入框，更新状态栏
-```
-
-TUI 不再判断“下一步该不该继续调用模型”，只忠实消费事件。Agent 核心因此可以用 headless 单元测试覆盖，TUI 只测渲染和交互。
 
 ## 文件组织
 
 ```text
-src/
-└── coco_code/
-    ├── agent/
-    │   ├── __init__.py
-    │   │   — 导出 AgentLoop、AgentMode、AgentLimits、AgentEvent 等核心类型
-    │   ├── types.py
-    │   │   — AgentMode、AgentStopReason、AgentLimits、AgentRunRequest、
-    │   │     AgentProgress、AgentEvent、StreamTurnResult、ToolBatch
-    │   ├── stream.py
-    │   │   — collect_stream_turn；消费 provider 流，实时转发文本事件，
-    │   │     同时收集完整 reply 和多个 tool calls
-    │   ├── tools.py
-    │   │   — registry_for_mode、validate_tool_allowed、ToolBatcher、
-    │   │     execute_tool_batches；负责工具过滤、分批、调度
-    │   └── loop.py
-    │       — AgentLoop 主循环；停止条件、历史写入、事件产出
-    │
-    ├── conversation.py
-    │   — 增加 AssistantToolCallsItem 和 add_tool_calls；
-    │     保持旧 AssistantToolCallItem 兼容
-    │
-    ├── llm/
-    │   ├── __init__.py
-    │   │   — StreamEvent 增加 tool_calls、usage；Provider 协议保持统一
-    │   ├── openai_provider.py
-    │   │   — OpenAI 多 tool_calls 解析；多工具历史回放
-    │   └── anthropic_provider.py
-    │       — Anthropic 多 tool_use 收集；多工具历史回放
-    │
-    ├── tools/
-    │   ├── base.py
-    │   │   — 保持 ToolSpec 元信息；必要时补充 helper，不改变现有语义
-    │   ├── registry.py
-    │   │   — 增加从 specs 过滤生成 registry 的能力，或提供 filtered clone
-    │   └── executor.py
-    │       — 继续负责确认、超时、参数校验、结构化错误
-    │
-    └── tui/
-        ├── app.py
-        │   — 接入 AgentLoop；解析 /plan、/do；消费 AgentEvent；
-        │     删除一次工具调用边界
-        ├── stream.py
-        │   — 迁移到 agent.stream 后保留兼容薄包装，或在测试迁移后删除
-        └── view.py
-            — 增加模式、进度、工具批次、停止原因展示函数
-```
+src/coco_code/
+├── mcp/
+│   ├── __init__.py        — 新：导出 McpConfig、ServerConfig、McpManager、load_config
+│   ├── config.py          — 新：两层 YAML、mcp_servers 合并、${VAR} 展开、字段校验、stderr 告警
+│   ├── manager.py         — 新：McpManager、ManagedSession、stdio/http 连接、startup/close timeout
+│   └── tool.py            — 新：McpTool、McpCaller、adapt_tool、schema/readOnly/content 映射
+├── tools/
+│   ├── base.py            — 改：ToolSpec 增加 timeout_seconds
+│   └── executor.py        — 改：外层执行超时优先使用 spec.timeout_seconds
+├── tui/
+│   └── app.py             — 改：持有 mcp_config/manager；on_mount 启动 MCP；退出关闭 MCP
+├── cli.py                 — 改：加载 MCP 配置并传入 CoCoCodeApp
+└── ...                    — permission / llm / provider / agent 不做 MCP 特殊改动
 
-测试文件组织：
-
-```text
 tests/
-├── test_agent_loop.py
-│   — 多轮循环、迭代上限、取消、未知工具、流式错误、纯对话兼容
-├── test_agent_tools.py
-│   — Plan Mode 工具过滤、多工具分批、只读并发、副作用串行
-├── test_llm_tool_events.py
-│   — OpenAI / Anthropic 多工具流式解析和历史回放
-├── test_conversation_tools.py
-│   — 多工具调用项顺序、messages() 兼容
-├── test_tui_app.py
-│   — TUI 模式切换、状态恢复、provider 选择不退化
-└── test_tui_tools.py
-    — 工具确认、工具结果展示、拒绝/超时等 UI 行为不退化
+├── test_mcp_config.py     — 新：两层合并、变量展开、字段校验、非法 YAML 降级、敏感值不输出
+├── test_mcp_tool.py       — 新：命名、schema、readOnly、成功/远端错误/异常/超时/非 text 块
+├── test_mcp_manager.py    — 新：启动成功、单 server 失败隔离、30s 超时、稳定排序、5s close
+├── test_tui_mcp.py        — 新/改：on_mount 注册 MCP 工具、注册冲突跳过、退出 close
+├── test_tools_executor.py — 改：覆盖 ToolSpec.timeout_seconds 优先生效
+└── test_permission_engine.py / test_permission_rules.py
+    — 补：mcp__server__tool 精确与 glob 规则、readOnly 分类、黑名单/沙箱不误拦
+
+docs/
+└── mcp-servers.example.yaml — 新：用户级/项目级 MCP 配置示例，密钥只用 ${VAR}
+
+pyproject.toml             — 改：新增 mcp、httpx 依赖
 ```
-
-文档文件：
-
-```text
-spec.md       — 已批准的 Agent Loop 需求
-plan.md       — 本技术方案
-task.md       — 后续按本方案拆成可执行任务
-checklist.md  — 后续验收清单
-INSTALL.md    — 若本章新增依赖，再补充安装说明；本方案预计不新增依赖
-```
-
-本章预计不新增第三方库。并发、取消、超时使用 Python 标准库 `asyncio`；事件类型使用 `dataclasses` 和 `StrEnum`；现有依赖 `textual`、`rich`、`openai`、`anthropic`、`pyyaml` 保持不变。
 
 ## 技术决策
 
 | 决策点 | 选择 | 理由 |
 |---|---|---|
-| Agent Loop 放在哪里 | 新增 `coco_code.agent` 包 | 避免继续膨胀 `tui.app`，让核心循环可用 fake provider/headless 测试验证。 |
-| TUI 与 Agent 如何通信 | 异步 `AgentEvent` 流 | 满足 spec 的事件流解耦要求；TUI 只渲染事件，不参与循环判断。 |
-| 流式处理方式 | 双路收集：实时发文本事件，同时累积完整结果 | 保持逐字流式体验，同时让 Agent 能判断是否继续调用工具。 |
-| 多工具表示 | `StreamEvent.tool_calls: tuple[ToolCall, ...]` | 直接表达“一次响应多个工具调用”，避免继续被单数 `tool_call` 限制。 |
-| 兼容旧接口 | 暂时保留 `StreamEvent.tool_call` 和旧 `AssistantToolCallItem` | 降低改动风险，旧测试和旧调用点可以逐步迁移。 |
-| 工具过滤依据 | 基于 `ToolSpec` 的 `read_only`、`destructive`、`confirmation`、`category` | 满足用户强调的“元信息是后续权限系统基础”，不靠硬编码工具名。 |
-| Plan Mode 工具集 | 只读、非破坏性、无需确认工具 | 保证 `/plan` 不会改文件、跑命令或安装依赖。 |
-| Do Mode 工具集 | 完整工具集 + 现有确认机制 | 执行计划需要文件修改和命令能力，但不能绕过确认。 |
-| 多工具执行策略 | 只读工具并发，副作用/确认/破坏性工具串行 | 提高只读观察效率，同时保证写文件、编辑和 shell 命令顺序可预测。 |
-| 并发结果顺序 | 执行可并发，历史写入按模型请求顺序 | 防止模型观察到乱序结果，保持协议可回放。 |
-| 未知/不允许工具 | 生成结构化 `ToolResult` 回灌模型，连续达到上限才停止 | 给模型一次自我修正机会，同时防止无限循环。 |
-| 迭代上限 | 默认 `max_iterations=8` | 足够覆盖“找文件 → 读 → 改 → 测 → 修”这类小任务，又能避免失控。 |
-| 只读并发上限 | 默认 `read_tool_concurrency=4` | 保守控制文件读取和搜索压力，避免 TUI 卡顿。 |
-| 响应超时 | 默认沿用 `300s` | 保持现有体验，同时避免无限 `Imagining...`。 |
-| 工具确认超时 | 默认沿用 `60s` | 避免确认弹窗无人处理时永久挂住。 |
-| 工具执行超时 | 默认沿用 `10s`，工具参数仍不能超过上下文上限 | 继续约束 `Bash` 和文件/搜索工具，避免长时间阻塞。 |
-| 取消实现 | cancel 当前 Agent task，并让 `ToolExecutor` / provider 保持 `CancelledError` 传播 | 符合 asyncio 语义，避免吞掉取消导致界面恢复不了。 |
-| Provider 协议差异 | 在 OpenAI/Anthropic adapter 内部处理 | Agent Loop 只看统一 `StreamEvent`，保证跨协议一致。 |
-| 测试策略 | 核心用 fake provider/fake tool/fake confirm，TUI 用 headless Textual 测试 | 不依赖真实 API，能稳定覆盖循环、分批、停止和模式行为。 |
-| 依赖选择 | 不新增第三方依赖 | 当前 `asyncio`、Textual、Rich 已足够实现本章，降低安装和兼容风险。 |
+| SDK | 官方 MCP Python SDK `mcp` | 对齐当前 Python 仓库；SDK 负责 stdio/http transport、ClientSession、initialize/list/call |
+| HTTP headers | `httpx.AsyncClient(headers=..., timeout=...)` 传给 `streamable_http_client` | 当前 SDK 文档推荐方式；新版不直接在 `streamable_http_client` 上传 headers/timeout |
+| MCP 配置文件 | `~/.coco-code/mcp.yaml` + `<root>/.coco-code/mcp.yaml` | 保持两层配置；独立文件允许 MCP YAML 非法时降级告警，不改变 provider config 的强校验 |
+| 配置键 | 顶层 `mcp_servers` map | 对齐 spec 与附件；每个 key 是 server 名 |
+| 合并语义 | 项目级同名 server 完整覆盖用户级 | 避免字段级半合并产生畸形 server |
+| 类型判断 | 显式 `type: stdio` / `type: http` | 不靠字段嗅探，错误更清晰，后续扩展更稳 |
+| 变量展开 | 仅 `env` / `headers` 的值展开 `${VAR}` | 凭据可来自宿主环境；command/args/name 不受环境隐式影响 |
+| 未定义变量 | 展开为空字符串 + stderr 告警 | 不替 server 判断凭据是否必需；避免启动硬失败 |
+| 启动位置 | TUI `on_mount` 中、用户可交互前完成 | SDK 会话必须在 Textual 事件循环内创建和使用；同时保证 Agent 开始前工具集稳定 |
+| 启动并发 | 每 server 一个 task，单 server 30s | 失败隔离；多个 server 不串行拖慢总启动 |
+| 工具集热加载 | 不做 | spec 明确本章工具集启动后稳定 |
+| 工具命名 | `mcp__<server>__<tool>` + `[A-Za-z0-9_-]` 校验 | 避免冲突；权限规则和 UI 可追溯来源；满足 provider 工具名限制 |
+| 重复工具名 | 同一 full_name 后者跳过并告警 | 保留已注册工具，降低意外覆盖风险 |
+| readOnly 映射 | 只信 `annotations.readOnlyHint == true` | 安全默认：缺失或非法都按有副作用处理 |
+| 非只读确认策略 | `ConfirmationPolicy.REQUIRED` | 有 permission engine 时由权限系统处理；无 permission engine 时仍有 legacy confirm 兜底 |
+| MCP 调用超时 | 内部 30s，ToolSpec 外层 31s | 内部先生成 MCP 专属错误结果；外层防 SDK 卡死 |
+| 非 text 内容 | 丢弃 + 每工具一次 stderr 告警 | 当前模型回灌只支持文本；不伪造不可表达内容 |
+| 错误处理 | SDK/协议/连接/超时异常转 ToolResult(ok=False) | 复用 Agent Loop 不中断契约，让模型后续轮次调整 |
+| 关闭 | 每 session 的 AsyncExitStack 并发关闭，总 5s | stdio 子进程、HTTP client、ClientSession 统一释放；单 server 卡住不拖死退出 |
+| 权限接入 | permission 包零改，补测试 | 现有 unknown-friendly-name 和 read_only 分类已经足够承载 MCP |
+| provider 接入 | 零改动 | provider 只关心 Tool schema 与 ToolResult payload；MCP 来源透明 |
+| 测试策略 | config/tool 用纯单元测试，manager 用 fake connector + 少量 SDK fake server | 大部分行为不依赖网络；避免测试不稳定，必要处覆盖 SDK 接入边界 |
 
-## Spec 覆盖自检
+## Spec 覆盖
 
-- `F1-F5`：由 `AgentLoop`、`AgentLimits`、停止原因、取消流程覆盖。
-- `F6-F7`：由 `AgentEvent` 和 `collect_stream_turn` 覆盖。
-- `F8-F10`：由 provider 多工具解析、`ToolBatcher`、`ToolExecutor` 确认机制覆盖。
-- `F11-F14`：由 `AgentMode`、`registry_for_mode`、TUI `/plan` `/do` 解析覆盖。
-- `F15-F17`：由未知工具计数、流式错误事件、进度/用量事件覆盖。
-- `F18-F20`：由兼容路径、会话历史顺序和 `AgentLimits` 默认值覆盖。
+| Spec | Plan 归属 |
+|---|---|
+| F1-F3 配置、类型校验、变量展开 | `mcp/config.py` |
+| F4 stdio 传输 | `mcp/manager.py::connect_stdio` |
+| F5 Streamable HTTP | `mcp/manager.py::connect_http` + `httpx.AsyncClient` |
+| F6 会话与 JSON-RPC | 官方 SDK `ClientSession.initialize/list_tools/call_tool`，Manager 负责错误转换 |
+| F7-F9 工具发现、命名、调用适配 | `mcp/tool.py` + Manager 注册 |
+| F10-F12 启动/调用/关闭超时与生命周期 | `McpManager.start`、`McpTool.run`、`McpManager.close` |
+| F13 权限复用 | 现有 permission 行为 + 补充测试 |

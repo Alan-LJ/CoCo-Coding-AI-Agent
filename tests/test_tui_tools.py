@@ -96,15 +96,15 @@ def test_consume_provider_stream_marks_second_tool_blocked() -> None:
 
 def test_tool_view_blocks_render() -> None:
     call = ToolCall("call-1", "ReadFile", {"path": "a.txt"}, "{}")
-    spec = ToolSpec("ReadFile", "读取文件", {}, ConfirmationPolicy.NEVER)
+    spec = ToolSpec("ReadFile", "璇诲彇鏂囦欢", {}, ConfirmationPolicy.NEVER)
     result = ToolResult("call-1", "ReadFile", True, "ok", {}, None, 3)
     output_result = ToolResult(
         "call-2",
         "Bash",
         False,
-        "命令执行失败，退出码 7。",
+        "command failed with exit code 7",
         {"stdout": "hello", "stderr": "bad"},
-        "命令退出码 7：bad",
+        "command exited 7: bad",
         3,
     )
     output_panel = tool_result_block(output_result)
@@ -199,6 +199,7 @@ def test_app_rejects_WriteFile_tool(tmp_path: Path) -> None:
 
     asyncio.run(run())
 
+
 def test_app_approves_WriteFile_with_modal(tmp_path: Path) -> None:
     async def run() -> None:
         call = ToolCall(
@@ -235,6 +236,7 @@ def test_app_approves_WriteFile_with_modal(tmp_path: Path) -> None:
             assert tool_results[0].ok is True
 
     asyncio.run(run())
+
 
 def test_app_times_out_write_confirmation(tmp_path: Path) -> None:
     async def never_confirm(call: ToolCall, spec: ToolSpec) -> bool:  # noqa: ARG001
@@ -273,7 +275,7 @@ def test_app_times_out_write_confirmation(tmp_path: Path) -> None:
                 item.result for item in app.conversation.items() if isinstance(item, ToolResultItem)
             ]
             assert tool_results[0].ok is False
-            assert "确认超时" in (tool_results[0].error or "")
+            assert "confirmation timed out" in (tool_results[0].error or "").casefold()
             assert app.conversation.messages()[-1].content == "timeout handled"
 
     asyncio.run(run())
@@ -297,6 +299,7 @@ def test_app_times_out_hanging_provider_stream(tmp_path: Path) -> None:
             assert app.state == SessionState.IDLE
 
     asyncio.run(run())
+
 
 def test_app_recovers_from_unhandled_stream_error(tmp_path: Path) -> None:
     async def run() -> None:
@@ -350,4 +353,3 @@ def test_app_continues_second_tool_call(tmp_path: Path) -> None:
             assert app.conversation.messages()[-1].content == "done"
 
     asyncio.run(run())
-

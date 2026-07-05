@@ -9,6 +9,8 @@ import yaml
 
 ProtocolName = Literal["anthropic", "openai", "openai-compat"]
 SUPPORTED_PROTOCOLS: set[str] = {"anthropic", "openai", "openai-compat"}
+DEFAULT_ANTHROPIC_CONTEXT_WINDOW = 200_000
+DEFAULT_OPENAI_CONTEXT_WINDOW = 128_000
 
 
 class ConfigError(Exception):
@@ -23,6 +25,7 @@ class ProviderConfig:
     base_url: str | None = None
     api_key: str | None = None
     thinking: bool = False
+    context_window: int = 0
 
 
 @dataclass(frozen=True)
@@ -95,6 +98,14 @@ def resolve_api_key(provider: ProviderConfig) -> str:
     )
 
 
+def effective_context_window(provider: ProviderConfig) -> int:
+    if provider.context_window > 0:
+        return provider.context_window
+    if provider.protocol == "openai" or provider.protocol == "openai-compat":
+        return DEFAULT_OPENAI_CONTEXT_WINDOW
+    return DEFAULT_ANTHROPIC_CONTEXT_WINDOW
+
+
 def _parse_config(raw: dict[str, Any]) -> Config:
     providers_raw = raw.get("providers")
     if not isinstance(providers_raw, list) or not providers_raw:
@@ -120,6 +131,7 @@ def _parse_provider(index: int, raw: Any) -> ProviderConfig:
     thinking_raw = raw.get("thinking", False)
     if not isinstance(thinking_raw, bool):
         raise ConfigError(f"providers[{index}].thinking 必须是布尔值")
+    context_window = _optional_non_negative_int(raw, "context_window", index)
 
     return ProviderConfig(
         name=name,
@@ -128,6 +140,7 @@ def _parse_provider(index: int, raw: Any) -> ProviderConfig:
         base_url=base_url,
         api_key=api_key,
         thinking=thinking_raw,
+        context_window=context_window,
     )
 
 
@@ -146,3 +159,12 @@ def _optional_str(raw: dict[str, Any], field: str, index: int) -> str | None:
         raise ConfigError(f"providers[{index}].{field} 必须是字符串")
     value = value.strip()
     return value or None
+
+
+def _optional_non_negative_int(raw: dict[str, Any], field: str, index: int) -> int:
+    value = raw.get(field, 0)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"providers[{index}].{field} 必须是非负整数")
+    if value < 0:
+        raise ConfigError(f"providers[{index}].{field} 必须是非负整数")
+    return value

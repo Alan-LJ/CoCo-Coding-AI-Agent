@@ -172,4 +172,3 @@ def test_Bash_times_out(tmp_path) -> None:
     )
     assert result.ok is False
     assert "超时" in (result.error or "")
-
