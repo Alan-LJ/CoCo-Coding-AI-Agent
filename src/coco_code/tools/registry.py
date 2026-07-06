@@ -21,14 +21,16 @@ class ToolRegistryError(ValueError):
 def describe_tool_for_model(spec: ToolSpec) -> str:
     read_only = str(spec.read_only).lower()
     destructive = str(spec.destructive).lower()
-    scenarios = "、".join(spec.typical_scenarios) if spec.typical_scenarios else "未标注"
+    scenarios = ", ".join(spec.typical_scenarios) if spec.typical_scenarios else "not specified"
+    system = str(spec.system).lower()
     return (
         f"{spec.description}\n\n"
-        "元信息："
+        "Metadata: "
         f"category={spec.category.value}; "
         f"read_only={read_only}; "
         f"destructive={destructive}; "
         f"confirmation={spec.confirmation.value}; "
+        f"system={system}; "
         f"typical_scenarios={scenarios}."
     )
 
@@ -42,10 +44,10 @@ class ToolRegistry:
         spec = tool.spec
         name = spec.name
         if name in self._tools or name in self._aliases:
-            raise ToolRegistryError(f"工具已注册：{name}")
+            raise ToolRegistryError(f"Tool already registered: {name}")
         for alias in spec.aliases:
             if alias in self._tools or alias in self._aliases:
-                raise ToolRegistryError(f"工具别名已注册：{alias}")
+                raise ToolRegistryError(f"Tool alias already registered: {alias}")
         self._tools[name] = tool
         for alias in spec.aliases:
             self._aliases[alias] = name
@@ -55,10 +57,16 @@ class ToolRegistry:
         try:
             return self._tools[canonical_name]
         except KeyError as exc:
-            raise ToolRegistryError(f"未知工具：{name}") from exc
+            raise ToolRegistryError(f"Unknown tool: {name}") from exc
 
     def list_specs(self) -> list[ToolSpec]:
         return [tool.spec for tool in self._tools.values()]
+
+    def names(self) -> tuple[str, ...]:
+        return tuple(self._tools)
+
+    def system_specs(self) -> tuple[ToolSpec, ...]:
+        return tuple(tool.spec for tool in self._tools.values() if tool.spec.system)
 
     def count(self) -> int:
         return len(self._tools)
@@ -67,6 +75,25 @@ class ToolRegistry:
         registry = ToolRegistry()
         for tool in self._tools.values():
             if predicate(tool.spec):
+                registry.register(tool)
+        return registry
+
+    def filtered_by_names(
+        self,
+        allowed: Any,
+        *,
+        include_system: bool = True,
+    ) -> ToolRegistry:
+        allowed_names = tuple(allowed or ())
+        if not allowed_names:
+            return self
+        canonical: set[str] = set()
+        for name in allowed_names:
+            canonical.add(self.get(str(name)).spec.name)
+        registry = ToolRegistry()
+        for tool in self._tools.values():
+            spec = tool.spec
+            if spec.name in canonical or (include_system and spec.system):
                 registry.register(tool)
         return registry
 

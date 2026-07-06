@@ -34,6 +34,7 @@ class ToolSpec:
     typical_scenarios: tuple[str, ...] = ()
     aliases: tuple[str, ...] = ()
     timeout_seconds: float | None = None
+    system: bool = False
 
 
 @dataclass(frozen=True)

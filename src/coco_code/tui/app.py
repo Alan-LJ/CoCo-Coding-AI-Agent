@@ -1,7 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
+import os
 import sys
+from contextlib import suppress
 from dataclasses import replace
 from enum import StrEnum
 from pathlib import Path
@@ -9,7 +11,8 @@ from time import monotonic, time
 from typing import Any
 
 from textual import events, on
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, ScreenStackError
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, OptionList, RichLog, Static, TextArea
@@ -31,6 +34,8 @@ from coco_code.command import (
     CommandSession,
     CommandStatus,
     build_default_registry,
+    register_skill_commands,
+    register_skill_management_command,
 )
 from coco_code.compact.manager import auto_threshold
 from coco_code.compact.recovery import RecoveryState
@@ -57,6 +62,10 @@ from coco_code.session import (
     load_session,
     session_paths,
 )
+from coco_code.skills.catalog import USER_SKILLS_DIR, SkillCatalog
+from coco_code.skills.executor import SkillExecutor
+from coco_code.skills.render import render_active_skills_block
+from coco_code.skills.types import SkillCatalogItem
 from coco_code.tools import (
     ConfirmationPolicy,
     ToolCall,
@@ -67,6 +76,8 @@ from coco_code.tools import (
 )
 from coco_code.tools.base import ConfirmCallback
 from coco_code.tools.executor import PermissionCallback
+from coco_code.tools.install_skill import InstallSkillTool
+from coco_code.tools.load_skill import LoadSkillTool
 from coco_code.tools.registry import ToolRegistry, ToolRegistryError
 from coco_code.tui.commands import dispatch_command, format_compact_notice, render_compact_error
 from coco_code.tui.complete import CompletionMenu
@@ -120,8 +131,24 @@ class CompletionKeyRequested(events.Message):
         super().__init__()
 
 
+CANCEL_KEYS = {"escape", "ctrl+c"}
+CTRL_C_EXIT_WINDOW_SECONDS = 1.5
+CTRL_C_DUPLICATE_EVENT_SECONDS = 0.05
+FORCE_EXIT_GRACE_SECONDS = 1.0
+FORCE_EXIT_RETURN_CODE = 130
+
+
 class PromptTextArea(TextArea):
     def on_key(self, event: events.Key) -> None:
+        handle_key_interrupt = getattr(self.app, "handle_key_interrupt", None)
+        if (
+            event.key in CANCEL_KEYS
+            and callable(handle_key_interrupt)
+            and handle_key_interrupt(event.key)
+        ):
+            event.prevent_default()
+            event.stop()
+            return
         completion = getattr(self.app, "completion_menu", None)
         completion_active = bool(getattr(completion, "active", False))
         if event.key in {"enter", "tab", "escape", "up", "down"} and (
@@ -234,7 +261,6 @@ class PermissionToolScreen(ModalScreen[Outcome]):
 
     BINDINGS = [
         ("escape", "reject", "Reject"),
-        ("ctrl+c", "reject", "Reject"),
     ]
 
     def __init__(self, call: ToolCall, spec: ToolSpec, reason: str) -> None:
@@ -306,7 +332,8 @@ class CoCoCodeApp(App[None]):
     """
 
     BINDINGS = [
-        ("ctrl+c", "quit", "Quit"),
+        Binding("escape", "cancel_streaming", "Cancel", show=False, priority=True),
+        Binding("ctrl+c", "interrupt", "Interrupt", priority=True),
     ]
 
     def __init__(
@@ -337,7 +364,19 @@ class CoCoCodeApp(App[None]):
         self.show_startup_resume = show_startup_resume
         self._startup_resume_shown = False
         self.tool_registry = tool_registry or create_default_registry()
+        self.skill_catalog = SkillCatalog.load(self.cwd)
+        self._skills_catalog_text = self.skill_catalog.catalog_text()
+        self._load_skill_tool = LoadSkillTool(self.skill_catalog, self.runtime.active_skills)
+        self._install_skill_tool = InstallSkillTool(
+            USER_SKILLS_DIR, reload_callback=self.reload_skills
+        )
+        for tool in (self._load_skill_tool, self._install_skill_tool):
+            try:
+                self.tool_registry.get(tool.spec.name)
+            except ToolRegistryError:
+                self.tool_registry.register(tool)
         self.command_registry = build_default_registry()
+        self.skill_executor: SkillExecutor | None = None
         self.completion_menu = CompletionMenu()
         self.tool_context = tool_context or ToolContext(workspace=self.cwd)
         self._confirm_callback = confirm_callback
@@ -380,6 +419,12 @@ class CoCoCodeApp(App[None]):
         self.stream_task: asyncio.Task[None] | None = None
         self.timer: Any | None = None
         self._closing = False
+        self._turn_token = 0
+        self._ctrl_c_exit_deadline = 0.0
+        self._last_ctrl_c_handled_at = 0.0
+        self._detached_turn_tasks: set[asyncio.Task[None]] = set()
+        self._mcp_close_task: asyncio.Task[None] | None = None
+        self._force_exit_handle: asyncio.TimerHandle | None = None
 
     def compose(self) -> ComposeResult:
         if len(self.config.providers) > 1:
@@ -395,6 +440,7 @@ class CoCoCodeApp(App[None]):
         self.timer = self.set_interval(1.0, self.refresh_streaming, pause=True)
         asyncio.create_task(asyncio.to_thread(clean_expired_sessions, self.cwd))
         await self.start_mcp()
+        self.setup_skills_after_tools_ready()
         if len(self.config.providers) == 1:
             self.activate_provider(self.config.providers[0])
         else:
@@ -419,8 +465,94 @@ class CoCoCodeApp(App[None]):
                     file=sys.stderr,
                 )
 
+    def setup_skills_after_tools_ready(self) -> None:
+        self._validate_skill_tools()
+        self._skills_catalog_text = self.skill_catalog.catalog_text()
+        self._load_skill_tool.attach(self.skill_catalog, self.runtime.active_skills)
+        self._install_skill_tool.set_reload_callback(self.reload_skills)
+        register_skill_management_command(
+            self.command_registry,
+            self.skill_catalog,
+            self.reload_skills,
+        )
+        self._register_skill_commands()
+
+    def reload_skills(self) -> None:
+        self.skill_catalog.reload()
+        self._validate_skill_tools()
+        self._skills_catalog_text = self.skill_catalog.catalog_text()
+        self._load_skill_tool.attach(self.skill_catalog, self.runtime.active_skills)
+        self._register_skill_commands()
+        if self.provider is not None and self.active_cfg is not None:
+            self.provider.set_system_prompt(self.build_current_system_prompt())
+
+    def _validate_skill_tools(self) -> None:
+        issues = self.skill_catalog.validate_tools(self.tool_registry)
+        if not issues:
+            return
+        self.skill_catalog.remove_invalid(issues)
+        for issue in issues:
+            try:
+                self.show_error(issue.message)
+            except Exception:
+                print(f"[skills] error: {issue.message}", file=sys.stderr)
+
+    def _register_skill_commands(self) -> None:
+        self.skill_executor = self._make_skill_executor()
+        try:
+            register_skill_commands(self.command_registry, self.skill_catalog, self.skill_executor)
+        except RuntimeError as exc:
+            try:
+                self.show_error(str(exc))
+            except Exception:
+                print(f"[skills] error: {exc}", file=sys.stderr)
+
+    def _make_skill_executor(self) -> SkillExecutor:
+        permission_callback = (
+            self.confirm_permission_call if self.permission_engine is not None else None
+        )
+        return SkillExecutor(
+            catalog=self.skill_catalog,
+            runtime=self.runtime,
+            conversation=self.conversation,
+            registry=self.tool_registry,
+            tool_context=self.tool_context,
+            confirm_callback=self.confirm_tool_call,
+            provider_config=self.active_cfg,
+            provider_configs=self.config.providers,
+            agent_limits=self.agent_limits,
+            permission_engine=self.permission_engine,
+            permission_callback=permission_callback,
+            permission_mode=self.permission_mode,
+            prompt_builder=self.build_current_system_prompt,
+        )
+
+    def build_current_system_prompt(
+        self,
+        provider_cfg: ProviderConfig | None = None,
+        runtime: SessionRuntime | None = None,
+    ) -> str:
+        cfg = provider_cfg or self.active_cfg
+        if cfg is None:
+            raise ConfigError("No active provider is available for system prompt construction.")
+        runtime = runtime or self.runtime
+        memory_text = (
+            self.memory_manager.load_index_text() if self.memory_manager is not None else ""
+        )
+        return build_system_prompt(
+            self.cwd,
+            cfg,
+            instructions=self.instruction_text,
+            memory=memory_text,
+            skills_catalog=self._skills_catalog_text,
+            active_skills=render_active_skills_block(runtime.active_skills.snapshot()),
+        )
+
     @on(OptionList.OptionSelected)
     def provider_selected(self, event: OptionList.OptionSelected) -> None:
+        if not isinstance(event.option_list, ProviderOptionList):
+            return
+        event.stop()
         index = getattr(event, "option_index", None)
         if index is None:
             index = getattr(event, "index", None)
@@ -501,15 +633,7 @@ class CoCoCodeApp(App[None]):
 
     def activate_provider(self, provider_cfg: ProviderConfig) -> None:
         try:
-            memory_text = (
-                self.memory_manager.load_index_text() if self.memory_manager is not None else ""
-            )
-            system_prompt = build_system_prompt(
-                self.cwd,
-                provider_cfg,
-                instructions=self.instruction_text,
-                memory=memory_text,
-            )
+            system_prompt = self.build_current_system_prompt(provider_cfg)
             self.provider = new_provider(provider_cfg, system_prompt)
             if self.memory_manager is not None:
                 self.memory_manager.set_provider(self.provider)
@@ -522,6 +646,7 @@ class CoCoCodeApp(App[None]):
             return
 
         self.active_cfg = provider_cfg
+        self._register_skill_commands()
         self.runtime.context_window = effective_context_window(provider_cfg)
         history = self.query_one("#history", RichLog)
         history.clear()
@@ -542,6 +667,7 @@ class CoCoCodeApp(App[None]):
         mode: AgentMode | None = None,
         permission_mode: PermissionMode | None = None,
     ) -> None:
+        self._reset_ctrl_c_exit_sequence()
         if self.provider is None or self.active_cfg is None:
             return
         if mode is None and permission_mode is None:
@@ -566,9 +692,11 @@ class CoCoCodeApp(App[None]):
         self.refresh_streaming()
         if self.timer is not None:
             self.timer.resume()
-        self.stream_task = asyncio.create_task(self._run_agent_turn(request))
+        self._turn_token += 1
+        turn_token = self._turn_token
+        self.stream_task = asyncio.create_task(self._run_agent_turn(request, turn_token))
 
-    async def _run_agent_turn(self, request: AgentRunRequest) -> None:
+    async def _run_agent_turn(self, request: AgentRunRequest, turn_token: int) -> None:
         assert self.provider is not None
         try:
             loop = AgentLoop(
@@ -579,14 +707,19 @@ class CoCoCodeApp(App[None]):
                 self.agent_limits,
                 runtime=self.runtime,
                 memory_manager=self.memory_manager,
+                system_prompt_builder=self.build_current_system_prompt,
             )
             async for event in loop.run(request):
+                if not self.is_current_turn(turn_token):
+                    return
                 await self.handle_agent_event(event)
         except asyncio.CancelledError:
-            raise
+            if not self._closing and self.is_current_turn(turn_token):
+                self.finish_cancelled_turn()
         except Exception as exc:
-            self.query_one("#history", RichLog).write(error_block(exc))
-            self.finish_streaming()
+            if self.is_current_turn(turn_token):
+                self.query_one("#history", RichLog).write(error_block(exc))
+                self.finish_streaming()
 
     async def handle_agent_event(self, event: AgentEvent) -> None:
         history = self.query_one("#history", RichLog)
@@ -717,6 +850,9 @@ class CoCoCodeApp(App[None]):
                 self.agent_limits,
                 runtime=restored_runtime,
                 memory_manager=self.memory_manager,
+                system_prompt_builder=lambda: self.build_current_system_prompt(
+                    runtime=restored_runtime
+                ),
             )
             try:
                 await loop.run_force_compact(self.agent_mode)
@@ -739,6 +875,8 @@ class CoCoCodeApp(App[None]):
             on_replace=writer.replace_items,
         )
         self.runtime = restored_runtime
+        self._load_skill_tool.attach(self.skill_catalog, self.runtime.active_skills)
+        self._register_skill_commands()
         restored_notice = (
             f"\u5df2\u6062\u590d\u4f1a\u8bdd {info.session_id}\uff0c"
             f"\u5171 {len(items)} \u6761\u6d88\u606f"
@@ -757,6 +895,7 @@ class CoCoCodeApp(App[None]):
             self.tool_executor,
             self.agent_limits,
             runtime=self.runtime,
+            system_prompt_builder=self.build_current_system_prompt,
         )
         try:
             output = await loop.run_force_compact(self.agent_mode)
@@ -820,6 +959,76 @@ class CoCoCodeApp(App[None]):
         self.stream_task = None
         self.update_status()
 
+    def cancel_current_turn(self) -> bool:
+        if not self.interaction_needs_recovery():
+            return False
+        task = self.stream_task
+        self._turn_token += 1
+        self.dismiss_active_confirmation()
+        self.finish_cancelled_turn()
+        self.detach_cancelled_turn_state()
+        if task is not None and not task.done():
+            task.cancel()
+            self._track_detached_turn_task(task)
+        return True
+
+    def finish_cancelled_turn(self) -> None:
+        if self.state == SessionState.STREAMING or self.stream_task is not None:
+            self.query_one("#history", RichLog).write(
+                agent_stop_block(AgentStopReason.USER_CANCELLED)
+            )
+        self.finish_streaming()
+
+    def dismiss_active_confirmation(self) -> None:
+        try:
+            screen = self.screen
+        except ScreenStackError:
+            return
+        if isinstance(screen, ConfirmToolScreen):
+            screen.dismiss(False)
+        elif isinstance(screen, PermissionToolScreen):
+            screen.dismiss(Outcome.DENY_ONCE)
+
+    def detach_cancelled_turn_state(self) -> None:
+        old_conversation = self.conversation
+        old_conversation.detach_callbacks()
+        writer = self.session_writer
+        self.conversation = Conversation.from_items(
+            old_conversation.items(),
+            on_append=writer.append_item if writer is not None else None,
+            on_replace=writer.replace_items if writer is not None else None,
+        )
+        self.runtime = SessionRuntime(
+            replacement=self.runtime.replacement,
+            recovery=self.runtime.recovery,
+            circuit_breaker=self.runtime.circuit_breaker,
+            session=self.runtime.session,
+            context_window=self.runtime.context_window,
+            usage_anchor=self.runtime.usage_anchor,
+            anchor_item_len=self.runtime.anchor_item_len,
+            turn_count=self.runtime.turn_count,
+            memory_update_task=self.runtime.memory_update_task,
+            active_skills=self.runtime.active_skills,
+            turn_tasks=self.runtime.turn_tasks,
+        )
+        self._load_skill_tool.attach(self.skill_catalog, self.runtime.active_skills)
+        self._register_skill_commands()
+
+    def interaction_needs_recovery(self) -> bool:
+        if self.state == SessionState.STREAMING or self.stream_task is not None:
+            return True
+        if isinstance(self.screen, ConfirmToolScreen | PermissionToolScreen):
+            return True
+        if self.active_cfg is not None:
+            try:
+                return self.query_one("#input", PromptTextArea).disabled
+            except Exception:
+                return False
+        return False
+
+    def is_current_turn(self, turn_token: int) -> bool:
+        return turn_token == self._turn_token
+
     def update_status(self) -> None:
         if self.active_cfg is None:
             return
@@ -840,11 +1049,43 @@ class CoCoCodeApp(App[None]):
         self.query_one("#history", RichLog).write(error_block(text))
 
     def clear_history(self) -> None:
+        self.conversation.replace_items([])
+        self.runtime.usage_anchor = 0
+        self.runtime.anchor_item_len = 0
+        self.clear_active_skills()
         history = self.query_one("#history", RichLog)
         history.clear()
         if self.active_cfg is not None:
             history.write(render_banner(__version__, self.cwd, self.active_cfg))
             self.show_tools()
+        self.update_status()
+
+    def clear_active_skills(self) -> None:
+        self.runtime.active_skills.clear()
+        if self.provider is not None and self.active_cfg is not None:
+            self.provider.set_system_prompt(self.build_current_system_prompt())
+
+    def append_assistant_message(self, text: str) -> None:
+        if not text:
+            return
+        self.conversation.add_assistant(text)
+        self.query_one("#history", RichLog).write(assistant_markdown(text))
+        self.update_status()
+
+    def list_catalog_skills(self) -> tuple[SkillCatalogItem, ...]:
+        return tuple(
+            SkillCatalogItem(
+                name=skill.meta.name,
+                description=skill.meta.description,
+                source=skill.source,
+                mode=skill.meta.mode,
+                entry_path=skill.entry_path,
+            )
+            for skill in self.skill_catalog.list()
+        )
+
+    def list_active_skills(self) -> tuple[str, ...]:
+        return tuple(entry.name for entry in self.runtime.active_skills.snapshot())
 
     def send_user_message(
         self,
@@ -867,6 +1108,7 @@ class CoCoCodeApp(App[None]):
     def set_permission_mode(self, mode: PermissionMode) -> None:
         self.permission_mode = mode
         self.tool_executor._default_permission_mode = mode
+        self._register_skill_commands()
 
     def run_compact(self) -> None:
         asyncio.create_task(self.run_manual_compact())
@@ -935,32 +1177,150 @@ class CoCoCodeApp(App[None]):
         self.completion_menu.hide()
         self.render_completion()
 
-    def request_quit(self) -> None:
-        if self.stream_task is not None and not self.stream_task.done():
-            self.stream_task.cancel()
+    def request_quit(self, *, force: bool = False) -> None:
+        already_closing = self._closing
+        self._closing = True
+        self._reset_ctrl_c_exit_sequence()
+        self.dismiss_active_confirmation()
+        self._cancel_turn_tasks_for_quit()
         if self.session_writer is not None:
             self.session_writer.close()
-        if self.mcp_manager is not None and not self._closing:
-            self._closing = True
-            asyncio.create_task(self._close_mcp_and_exit())
-            return
+        close_task = self._mcp_close_task
+        if already_closing and close_task is not None and not close_task.done():
+            close_task.cancel()
+        elif self.mcp_manager is not None and self._mcp_close_task is None:
+            self._mcp_close_task = asyncio.create_task(self._close_mcp_best_effort())
         self.exit()
+        if force:
+            self._schedule_force_exit()
 
-    async def _close_mcp_and_exit(self) -> None:
-        assert self.mcp_manager is not None
-        await self.mcp_manager.close()
-        self.mcp_manager = None
-        self.exit()
+    def _schedule_force_exit(self) -> None:
+        if self._force_exit_handle is not None and not self._force_exit_handle.cancelled():
+            return
+        loop = asyncio.get_running_loop()
+        self._force_exit_handle = loop.call_later(
+            FORCE_EXIT_GRACE_SECONDS, self._force_exit_now
+        )
+
+    def _force_exit_now(self) -> None:
+        driver = getattr(self, "_driver", None)
+        if driver is not None:
+            with suppress(Exception):
+                driver.stop_application_mode()
+            with suppress(Exception):
+                driver.close()
+        os._exit(FORCE_EXIT_RETURN_CODE)
+
+    def _cancel_turn_tasks_for_quit(self) -> None:
+        self.runtime.cancel_turn_tasks()
+        if self.stream_task is not None and not self.stream_task.done():
+            self.stream_task.cancel()
+        for task in tuple(self._detached_turn_tasks):
+            if not task.done():
+                task.cancel()
+
+    def _track_detached_turn_task(self, task: asyncio.Task[None]) -> None:
+        if task.done():
+            self._consume_task_exception(task)
+            return
+        self._detached_turn_tasks.add(task)
+        task.add_done_callback(self._forget_detached_turn_task)
+
+    def _forget_detached_turn_task(self, task: asyncio.Task[None]) -> None:
+        self._detached_turn_tasks.discard(task)
+        self._consume_task_exception(task)
+
+    def _consume_task_exception(self, task: asyncio.Task[None]) -> None:
+        if not task.done():
+            return
+        with suppress(asyncio.CancelledError, Exception):
+            task.exception()
+
+    async def _close_mcp_best_effort(self) -> None:
+        manager = self.mcp_manager
+        if manager is None:
+            return
+        try:
+            await manager.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[mcp] warn: close failed during app shutdown: {exc}", file=sys.stderr)
+        finally:
+            if self.mcp_manager is manager:
+                self.mcp_manager = None
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action in {"cancel_streaming", "interrupt"}:
+            return True
+        return True
 
     async def action_quit(self) -> None:
         self.request_quit()
+
+    async def action_cancel_streaming(self) -> None:
+        self.handle_key_interrupt("escape")
+
+    async def action_interrupt(self) -> None:
+        self.handle_key_interrupt("ctrl+c")
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key in CANCEL_KEYS and self.handle_key_interrupt(event.key):
+            event.prevent_default()
+            event.stop()
+
+    def handle_key_interrupt(self, key: str) -> bool:
+        if key == "escape":
+            self._reset_ctrl_c_exit_sequence()
+            if isinstance(self.screen, ResumeSessionScreen):
+                self.screen.dismiss(None)
+                return True
+            if self.cancel_current_turn():
+                return True
+            if self.completion_menu.active:
+                self.hide_completion()
+                return True
+            self.request_quit()
+            return True
+        if key == "ctrl+c":
+            return self._handle_ctrl_c()
+        return False
+
+    def _handle_ctrl_c(self) -> bool:
+        now = monotonic()
+        if now - self._last_ctrl_c_handled_at < CTRL_C_DUPLICATE_EVENT_SECONDS:
+            return True
+        self._last_ctrl_c_handled_at = now
+        if self._ctrl_c_exit_deadline and now <= self._ctrl_c_exit_deadline:
+            self._reset_ctrl_c_exit_sequence()
+            self.request_quit(force=True)
+            return True
+
+        if self._closing:
+            self.request_quit(force=True)
+            return True
+
+        self._ctrl_c_exit_deadline = now + CTRL_C_EXIT_WINDOW_SECONDS
+        if self.cancel_current_turn():
+            self.show_message("Press Ctrl+C again to exit.")
+            return True
+        if self.completion_menu.active:
+            self.hide_completion()
+        self.show_message("Press Ctrl+C again to exit.")
+        return True
+
+    def _reset_ctrl_c_exit_sequence(self) -> None:
+        self._ctrl_c_exit_deadline = 0.0
 
 
 def parse_agent_request(text: str) -> AgentRunRequest:
     stripped = text.strip()
     if stripped == "/plan":
         return AgentRunRequest(
-            "请先进入计划模式，只分析和规划，不修改文件或执行有副作用的操作。",
+            (
+                "Enter plan mode. Analyze and plan only; "
+                "do not edit files or run side-effecting actions."
+            ),
             AgentMode.PLAN,
             PermissionMode.PLAN,
         )
@@ -972,7 +1332,7 @@ def parse_agent_request(text: str) -> AgentRunRequest:
         )
     if stripped == "/do":
         return AgentRunRequest(
-            "请进入执行模式，按计划推进并在需要时修改文件。",
+            "Enter execution mode. Follow the plan and edit files when needed.",
             AgentMode.DO,
             PermissionMode.DEFAULT,
         )
@@ -987,3 +1347,13 @@ def parse_agent_request(text: str) -> AgentRunRequest:
 
 def next_permission_mode(mode: PermissionMode) -> PermissionMode:
     return PermissionMode((int(mode) + 1) % len(PermissionMode))
+
+
+
+
+
+
+
+
+
+

@@ -54,6 +54,9 @@ class AnthropicProvider:
     def protocol(self) -> str:
         return self._cfg.protocol
 
+    def set_system_prompt(self, text: str) -> None:
+        self._system_prompt = text
+
     async def stream(
         self,
         messages: list[ConversationItem],
@@ -187,7 +190,7 @@ class AnthropicToolAccumulator:
             if not isinstance(arguments, dict):
                 return StreamEvent(
                     type=StreamEventType.ERROR,
-                    error=ValueError("工具参数必须是 JSON object。"),
+                    error=ValueError("Tool arguments must be a JSON object."),
                 )
             calls.append(
                 ToolCall(
@@ -224,7 +227,7 @@ def anthropic_message_from_item(item: ConversationItem) -> dict[str, Any]:
                 }
             ],
         }
-    raise TypeError(f"不支持的会话项：{type(item)!r}")
+    raise TypeError(f"涓嶆敮鎸佺殑浼氳瘽椤癸細{type(item)!r}")
 
 
 def _assistant_tool_calls_message(calls: Sequence[ToolCall]) -> dict[str, Any]:

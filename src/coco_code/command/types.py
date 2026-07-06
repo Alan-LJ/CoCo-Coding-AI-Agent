@@ -7,6 +7,7 @@ from typing import Protocol
 
 from coco_code.agent import AgentMode
 from coco_code.permission import Mode as PermissionMode
+from coco_code.skills.types import SkillCatalogItem
 
 
 class CommandKind(StrEnum):
@@ -53,6 +54,16 @@ class CommandUI(Protocol):
     def show_error(self, text: str) -> None: ...
 
     def clear_history(self) -> None: ...
+
+    def clear_active_skills(self) -> None: ...
+
+    def append_assistant_message(self, text: str) -> None: ...
+
+    def reload_skills(self) -> None: ...
+
+    def list_catalog_skills(self) -> tuple[SkillCatalogItem, ...]: ...
+
+    def list_active_skills(self) -> tuple[str, ...]: ...
 
     def send_user_message(
         self,

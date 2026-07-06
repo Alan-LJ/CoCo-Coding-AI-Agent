@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 
 from coco_code.command.types import Command
@@ -31,6 +32,18 @@ class CommandRegistry:
 
     def visible(self) -> list[Command]:
         return list(self._visible)
+
+    def names(self) -> tuple[str, ...]:
+        return tuple(sorted(command.name for command in self._visible))
+
+    def remove_where(self, predicate: Callable[[Command], bool]) -> None:
+        removed = {command.name for command in self._visible if predicate(command)}
+        if not removed:
+            return
+        self._visible = [command for command in self._visible if command.name not in removed]
+        self._by_name = {
+            key: command for key, command in self._by_name.items() if command.name not in removed
+        }
 
     def complete(self, prefix: str) -> list[Command]:
         normalized = prefix.strip()

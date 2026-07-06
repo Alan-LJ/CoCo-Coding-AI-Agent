@@ -1,7 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 from coco_code.agent.runtime import SessionRuntime, new_session_runtime
@@ -43,6 +43,7 @@ from coco_code.tools.registry import ToolRegistry
 
 type CollectQueueItem = AgentEvent | StreamTurnResult
 type ExecuteQueueItem = AgentEvent | tuple[ToolResult, ...]
+type SystemPromptBuilder = Callable[[], str]
 
 
 class AgentLoop:
@@ -55,6 +56,7 @@ class AgentLoop:
         limits: AgentLimits,
         runtime: SessionRuntime | None = None,
         memory_manager: MemoryManager | None = None,
+        system_prompt_builder: SystemPromptBuilder | None = None,
     ) -> None:
         self._provider = provider
         self._conversation = conversation
@@ -64,6 +66,7 @@ class AgentLoop:
         self._batcher = ToolBatcher()
         self._workspace = _workspace_from_executor(executor)
         self._memory_manager = memory_manager
+        self._system_prompt_builder = system_prompt_builder
         self._runtime = runtime or new_session_runtime(
             self._workspace,
             _default_context_window(provider.protocol),
@@ -87,10 +90,12 @@ class AgentLoop:
             permission_mode=permission_mode,
         )
         unknown_count = 0
-        active_registry = registry_for_mode(self._registry, effective_mode)
 
         try:
             for iteration in range(1, self._limits.max_iterations + 1):
+                active_base_registry = self._active_base_registry()
+                active_registry = registry_for_mode(active_base_registry, effective_mode)
+                self._refresh_system_prompt()
                 yield self._progress(iteration, "waiting_model")
                 async for compact_event in self._auto_manage_context(active_registry):
                     yield compact_event
@@ -135,7 +140,7 @@ class AgentLoop:
                 invalid_results: dict[str, ToolResult] = {}
                 valid_calls: list[ToolCall] = []
                 for call in result.tool_calls:
-                    invalid = validate_tool_allowed(call, self._registry, effective_mode)
+                    invalid = validate_tool_allowed(call, active_base_registry, effective_mode)
                     if invalid is None:
                         valid_calls.append(call)
                     else:
@@ -160,7 +165,7 @@ class AgentLoop:
                 if valid_calls:
                     yield self._progress(iteration, "executing_tools")
                     batches = self._batcher.build_batches(
-                        valid_calls, self._registry, effective_mode
+                        valid_calls, active_registry, effective_mode
                     )
                     async for exec_item in self._execute_batches_stream(batches, permission_mode):
                         if isinstance(exec_item, tuple):
@@ -188,7 +193,8 @@ class AgentLoop:
 
     async def run_force_compact(self, mode: AgentMode | None = None) -> ManageOutput:
         async with self._runtime.lock:
-            active_registry = registry_for_mode(self._registry, mode or AgentMode.AGENT)
+            self._refresh_system_prompt()
+            active_registry = self._effective_registry(mode or AgentMode.AGENT)
             estimated = self._estimate_tokens()
             return await manage_context(
                 ManageInput(
@@ -298,6 +304,7 @@ class AgentLoop:
     async def _collect_turn_stream(self, tools: ToolRegistry) -> AsyncIterator[CollectQueueItem]:
         queue: asyncio.Queue[CollectQueueItem] = asyncio.Queue()
         task = asyncio.create_task(self._collect_turn_task(tools, queue))
+        self._runtime.track_turn_task(task)
         try:
             while True:
                 item = await queue.get()
@@ -314,21 +321,30 @@ class AgentLoop:
         tools: ToolRegistry,
         queue: asyncio.Queue[CollectQueueItem],
     ) -> None:
+        stream_task = asyncio.create_task(
+            collect_stream_turn(
+                self._provider,
+                self._conversation.items(),
+                tools,
+                self._queue_collect_event(queue),
+            )
+        )
+        self._runtime.track_turn_task(stream_task)
         try:
-            result = await asyncio.wait_for(
-                collect_stream_turn(
-                    self._provider,
-                    self._conversation.items(),
-                    tools,
-                    self._queue_collect_event(queue),
-                ),
-                timeout=self._limits.response_timeout_seconds,
+            done, _ = await asyncio.wait(
+                {stream_task}, timeout=self._limits.response_timeout_seconds
             )
-        except TimeoutError:
-            result = StreamTurnResult(
-                reply="",
-                error=TimeoutError("Model response timed out; this turn was stopped."),
-            )
+            if stream_task not in done:
+                stream_task.cancel()
+                result = StreamTurnResult(
+                    reply="",
+                    error=TimeoutError("Model response timed out; this turn was stopped."),
+                )
+            else:
+                result = await stream_task
+        except asyncio.CancelledError:
+            stream_task.cancel()
+            raise
         except Exception as exc:
             result = StreamTurnResult(reply="", error=exc)
         await queue.put(result)
@@ -346,6 +362,7 @@ class AgentLoop:
     ) -> AsyncIterator[ExecuteQueueItem]:
         queue: asyncio.Queue[ExecuteQueueItem] = asyncio.Queue()
         task = asyncio.create_task(self._execute_batches_task(batches, queue, permission_mode))
+        self._runtime.track_turn_task(task)
         try:
             while True:
                 item = await queue.get()
@@ -479,13 +496,32 @@ class AgentLoop:
             self._memory_manager.update_async(list(recent_items))
         )
 
+    def _refresh_system_prompt(self) -> None:
+        if self._system_prompt_builder is None:
+            return
+        setter = getattr(self._provider, "set_system_prompt", None)
+        if callable(setter):
+            setter(self._system_prompt_builder())
+
+    def _active_base_registry(self) -> ToolRegistry:
+        allowed_tools = self._runtime.active_skills.allowed_tool_union()
+        if not allowed_tools:
+            return self._registry
+        return self._registry.filtered_by_names(allowed_tools)
+
+    def _effective_registry(self, mode: AgentMode) -> ToolRegistry:
+        return registry_for_mode(self._active_base_registry(), mode)
+
     def _should_update_memory(self, recent_items: list[ConversationItem]) -> bool:
         if self._runtime.turn_count % 5 == 0:
             return True
         text = "\n".join(
             item.content for item in recent_items if isinstance(item, ChatMessage)
         ).casefold()
-        return any(keyword in text for keyword in ("记住", "记忆", "别忘", "remember", "memo"))
+        return any(
+            keyword in text
+            for keyword in ("\u8bb0\u4f4f", "\u8bb0\u5fc6", "\u522b\u5fd8", "remember", "memo")
+        )
 
 
 def _permission_mode_for_agent_mode(mode: AgentMode) -> PermissionMode:
@@ -512,3 +548,6 @@ def _default_context_window(protocol: str) -> int:
     if protocol in {"openai", "openai-compat"}:
         return 128_000
     return 200_000
+
+
+

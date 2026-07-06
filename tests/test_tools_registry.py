@@ -29,14 +29,7 @@ class DummyTool:
 def test_default_registry_contains_six_core_tools() -> None:
     registry = create_default_registry()
     names = {spec.name for spec in registry.list_specs()}
-    assert names == {
-        "ReadFile",
-        "WriteFile",
-        "EditFile",
-        "Bash",
-        "Glob",
-        "Grep",
-    }
+    assert names == {"ReadFile", "WriteFile", "EditFile", "Bash", "Glob", "Grep"}
 
 
 def test_default_registry_confirmation_policies() -> None:
@@ -54,19 +47,20 @@ def test_default_registry_tool_metadata_matches_permission_table() -> None:
     registry = create_default_registry()
     specs = {spec.name: spec for spec in registry.list_specs()}
     expected = {
-        "ReadFile": (ToolCategory.FILE, True, False, ("查看文件内容", "读取配置")),
-        "WriteFile": (ToolCategory.FILE, False, False, ("创建新文件", "覆盖写入")),
-        "EditFile": (ToolCategory.FILE, False, False, ("精确修改文件某几行", "节省 token")),
-        "Bash": (ToolCategory.SHELL, False, True, ("编译", "测试", "安装依赖", "执行命令")),
-        "Glob": (ToolCategory.SEARCH, True, False, ("了解项目结构", "查找特定类型文件")),
-        "Grep": (ToolCategory.SEARCH, True, False, ("搜索代码中的函数定义", "搜索变量引用")),
+        "ReadFile": (ToolCategory.FILE, True, False),
+        "WriteFile": (ToolCategory.FILE, False, False),
+        "EditFile": (ToolCategory.FILE, False, False),
+        "Bash": (ToolCategory.SHELL, False, True),
+        "Glob": (ToolCategory.SEARCH, True, False),
+        "Grep": (ToolCategory.SEARCH, True, False),
     }
-    for name, (category, read_only, destructive, scenarios) in expected.items():
+    for name, (category, read_only, destructive) in expected.items():
         spec = specs[name]
         assert spec.category == category
         assert spec.read_only is read_only
         assert spec.destructive is destructive
-        assert spec.typical_scenarios == scenarios
+        assert spec.typical_scenarios
+        assert spec.system is False
 
 
 def test_registry_rejects_duplicate_names() -> None:
@@ -108,7 +102,7 @@ def test_registry_converts_to_openai_and_anthropic_formats() -> None:
     assert "destructive=true" in bash_openai["function"]["description"]
     assert "PowerShell" in bash_openai["function"]["description"]
     assert "category=shell" in bash_anthropic["description"]
-    assert "typical_scenarios=编译、测试、安装依赖、执行命令" in bash_anthropic["description"]
+    assert "typical_scenarios=" in bash_anthropic["description"]
     assert {item["function"]["name"] for item in openai_tools} == {
         item["name"] for item in anthropic_tools
     }

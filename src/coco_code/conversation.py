@@ -92,6 +92,10 @@ class Conversation:
     def clear(self) -> None:
         self._items.clear()
 
+    def detach_callbacks(self) -> None:
+        self._on_append = None
+        self._on_replace = None
+
     def _append(self, item: ConversationItem) -> None:
         self._items.append(item)
         if self._on_append is not None:

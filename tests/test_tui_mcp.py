@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from pathlib import Path
@@ -45,6 +45,18 @@ class FakeMcpManager:
         return self._tools
 
     async def close(self) -> None:
+        self.closed = True
+
+
+class SlowMcpManager(FakeMcpManager):
+    def __init__(self) -> None:
+        super().__init__([])
+        self.close_started = asyncio.Event()
+        self.release_close = asyncio.Event()
+
+    async def close(self) -> None:
+        self.close_started.set()
+        await self.release_close.wait()
         self.closed = True
 
 
@@ -114,3 +126,31 @@ def test_request_quit_cancels_streaming_and_closes_mcp_manager(
         assert exited is True
 
     asyncio.run(run())
+
+
+def test_request_quit_exits_before_slow_mcp_close(tmp_path: Path, monkeypatch) -> None:
+    async def run() -> None:
+        manager = SlowMcpManager()
+        app = CoCoCodeApp(_config(), cwd=tmp_path, mcp_manager=manager)
+        exited = False
+
+        def fake_exit() -> None:
+            nonlocal exited
+            exited = True
+
+        monkeypatch.setattr(app, "exit", fake_exit)
+
+        app.request_quit()
+        await asyncio.wait_for(manager.close_started.wait(), timeout=1)
+
+        assert exited is True
+        assert manager.closed is False
+
+        manager.release_close.set()
+        assert app._mcp_close_task is not None
+        await asyncio.wait_for(app._mcp_close_task, timeout=1)
+        assert manager.closed is True
+
+    asyncio.run(run())
+
+

@@ -132,3 +132,38 @@ providers:
 - 本地缓存、日志、临时测试目录和生成文件
 
 可以提交 `.coco-code/config.yaml.example`，但其中只能包含占位配置，不能包含真实密钥。
+## Skill System
+
+Skills package reusable AI workflows as Markdown SOPs so users do not need to paste the same prompt repeatedly. At startup CoCo Code injects only the Skill name and one-line description. The full SOP is loaded later by the system-level `LoadSkill` tool or by a slash command.
+
+Skill locations are loaded in override order:
+
+1. Built-in: `src/coco_code/skills/builtin/`
+2. User: `~/.coco-code/skills/`
+3. Project: `<project>/.coco-code/skills/`
+
+A directory Skill is a folder containing `SKILL.md`; a single-file Skill is a direct Markdown file in one of those roots. A `SKILL.md` file uses YAML frontmatter plus a Markdown body:
+
+```markdown
+---
+name: review
+description: Review code changes for likely defects.
+allowed_tools:
+  - ReadFile
+  - Grep
+mode: inline
+context: none
+model: optional-provider-or-model-name
+---
+
+Follow this SOP for $ARGUMENTS.
+```
+
+Fields: `name`, `description`, optional `allowed_tools`, `mode` (`inline` or `fork`), `context` (`none`, `recent`, or `full`), and optional `model`.
+
+Commands and tools:
+
+- `/<skill-name> [args]` runs a loaded Skill shortcut. Built-ins include `/commit`, `/review`, and `/test`.
+- `/skill list`, `/skill info <name>`, `/skill active`, and `/skill reload` manage the local catalog.
+- `LoadSkill` is read-only and system-level; it activates the latest valid SOP without returning the SOP body as tool output.
+- `InstallSkill` installs supported remote directory Skills into `~/.coco-code/skills/`, requires confirmation, enforces size/path limits, reloads the catalog, and does not overwrite an existing target.

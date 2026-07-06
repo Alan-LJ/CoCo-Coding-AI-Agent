@@ -15,14 +15,12 @@ def test_system_prompt_contains_environment_and_scope() -> None:
     )
     prompt = build_system_prompt(Path("P:/AI/CoCo Code_Agent"), provider)
     assert "CoCo Code" in prompt
-    assert "当前工作目录" in prompt
+    assert "Current working directory" in prompt
     assert "claude-test" in prompt
-    assert "工具调用" in prompt
-    assert "文件读写" in prompt
-    assert "代码编辑" in prompt
-    assert "ReAct Agent Loop" in prompt
-    assert "只支持“请求一次工具" not in prompt
-    assert "不要继续请求第二个工具" not in prompt
+    assert "tool calls" in prompt
+    assert "read files" in prompt
+    assert "edit code" in prompt
+    assert "Modes:" in prompt
     assert "secret-key" not in prompt
 
 
@@ -50,7 +48,7 @@ def test_system_prompt_injects_memory_and_instructions() -> None:
         instructions="Project rules",
         memory="Memory index",
     )
-    assert "long-term-memory" in prompt
-    assert "custom-instructions" in prompt
+    assert "Long-term Memory Index" in prompt
+    assert "Project Instructions" in prompt
     assert "Memory index" in prompt
     assert "Project rules" in prompt

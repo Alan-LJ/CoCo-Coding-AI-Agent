@@ -136,9 +136,6 @@ def test_do_with_args_sends_execution_prompt() -> None:
     assert ui.sent == [("fix bug", "/do fix bug", AgentMode.DO, PermissionMode.DEFAULT)]
 
 
-def test_review_sends_preset_prompt() -> None:
-    ui = RecordingUI()
-    run_command("review", ui)
-    assert ui.sent
-    assert "review" in ui.sent[0][0].lower()
-    assert ui.sent[0][1] == "/review"
+def test_review_is_provided_by_skill_system_not_default_builtins() -> None:
+    registry = build_default_registry()
+    assert registry.lookup("review") is None

@@ -49,6 +49,9 @@ class _BaseOpenAIProvider:
     def protocol(self) -> str:
         return self._cfg.protocol
 
+    def set_system_prompt(self, text: str) -> None:
+        self._system_prompt = text
+
     async def stream(
         self,
         messages: list[ConversationItem],
@@ -115,7 +118,7 @@ def openai_message_from_item(item: ConversationItem) -> dict[str, Any]:
             "tool_call_id": item.result.tool_call_id,
             "content": json.dumps(tool_result_payload(item.result), ensure_ascii=False),
         }
-    raise TypeError(f"不支持的会话项：{type(item)!r}")
+    raise TypeError(f"涓嶆敮鎸佺殑浼氳瘽椤癸細{type(item)!r}")
 
 
 def _assistant_tool_calls_message(calls: Sequence[ToolCall]) -> dict[str, Any]:
@@ -241,7 +244,9 @@ def _openai_tool_event(accumulator: dict[int, dict[str, str]]) -> StreamEvent:
 
 def _openai_tool_calls_event(accumulator: dict[int, dict[str, str]]) -> StreamEvent:
     if not accumulator:
-        return StreamEvent(type=StreamEventType.ERROR, error=ValueError("OpenAI 工具调用为空。"))
+        return StreamEvent(
+            type=StreamEventType.ERROR, error=ValueError("OpenAI tool call was empty.")
+        )
     calls: list[ToolCall] = []
     for index in sorted(accumulator):
         state = accumulator[index]
@@ -253,7 +258,7 @@ def _openai_tool_calls_event(accumulator: dict[int, dict[str, str]]) -> StreamEv
         if not isinstance(arguments, dict):
             return StreamEvent(
                 type=StreamEventType.ERROR,
-                error=ValueError("工具参数必须是 JSON object。"),
+                error=ValueError("Tool arguments must be a JSON object."),
             )
         calls.append(
             ToolCall(

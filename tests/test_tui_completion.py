@@ -14,7 +14,7 @@ def test_completion_lists_slash_commands() -> None:
     menu = CompletionMenu()
     menu.update("/", build_default_registry())
     assert menu.active is True
-    assert len(menu.items) == 10
+    assert len(menu.items) == 9
 
 
 def test_completion_filters_by_prefix_and_alias() -> None:
@@ -25,8 +25,8 @@ def test_completion_filters_by_prefix_and_alias() -> None:
 
 def test_single_completion() -> None:
     menu = CompletionMenu()
-    menu.update("/rev", build_default_registry())
-    assert menu.single_completion() == "/review "
+    menu.update("/per", build_default_registry())
+    assert menu.single_completion() == "/permission "
 
 
 def test_move_and_select() -> None:

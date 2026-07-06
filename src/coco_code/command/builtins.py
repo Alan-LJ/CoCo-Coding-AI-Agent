@@ -9,7 +9,6 @@ from coco_code.command.handlers import (
     handle_permission,
     handle_plan,
     handle_resume,
-    handle_review,
     handle_session,
     handle_status,
     handle_tools,
@@ -26,7 +25,6 @@ PUBLIC_COMMAND_NAMES = (
     "memory",
     "permission",
     "plan",
-    "review",
     "session",
     "status",
 )
@@ -128,15 +126,6 @@ def _register_public(registry: CommandRegistry) -> None:
             usage="/status",
             kind=CommandKind.LOCAL,
             handler=handle_status,
-        )
-    )
-    registry.register(
-        Command(
-            name="review",
-            description="Ask the agent to review current code context.",
-            usage="/review",
-            kind=CommandKind.PROMPT,
-            handler=handle_review,
         )
     )
 

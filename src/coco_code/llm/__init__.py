@@ -46,6 +46,8 @@ class Provider(Protocol):
     @property
     def protocol(self) -> str: ...
 
+    def set_system_prompt(self, text: str) -> None: ...
+
     def stream(
         self,
         messages: list[ConversationItem],
