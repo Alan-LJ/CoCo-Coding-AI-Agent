@@ -4,16 +4,63 @@ import re
 from dataclasses import dataclass, field
 
 from coco_code.permission import Decision
+from coco_code.permission.matcher import (
+    Matcher,
+    command_glob_to_regex,
+    compile_matcher,
+    match_glob,
+    normalize_pathish,
+    path_glob_to_regex,
+)
+from coco_code.permission.matcher import (
+    escape_glob as escape_glob,
+)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class Rule:
     tool: str
-    pattern: str
+    matcher: Matcher | None
     allow: bool
+    raw_pattern: str = ""
+
+    def __init__(
+        self,
+        tool: str,
+        pattern: str | Matcher | None = "",
+        allow: bool = True,
+        *,
+        matcher: Matcher | None = None,
+        raw_pattern: str | None = None,
+    ) -> None:
+        object.__setattr__(self, "tool", tool)
+        object.__setattr__(self, "allow", allow)
+        if matcher is not None:
+            object.__setattr__(self, "matcher", matcher)
+            object.__setattr__(self, "raw_pattern", raw_pattern or "")
+            return
+        if pattern is None:
+            object.__setattr__(self, "matcher", None)
+            object.__setattr__(self, "raw_pattern", raw_pattern or "")
+            return
+        if not isinstance(pattern, str):
+            object.__setattr__(self, "matcher", pattern)
+            object.__setattr__(self, "raw_pattern", raw_pattern or str(pattern))
+            return
+        raw = raw_pattern if raw_pattern is not None else pattern
+        object.__setattr__(self, "raw_pattern", raw)
+        object.__setattr__(
+            self,
+            "matcher",
+            None if pattern == "" else compile_matcher(pattern, path_like=_path_like_tool(tool)),
+        )
+
+    @property
+    def pattern(self) -> str:
+        return self.raw_pattern
 
     def text(self) -> str:
-        return self.tool if self.pattern == "" else f"{self.tool}({self.pattern})"
+        return self.tool if self.raw_pattern == "" else f"{self.tool}({self.raw_pattern})"
 
 
 @dataclass
@@ -27,50 +74,49 @@ class RuleSet:
 
     def find_match(self, friendly: str, target: str) -> tuple[Decision, bool, Rule | None]:
         for rule in self.deny:
-            if _tool_matches(rule.tool, friendly) and match_pattern(rule.pattern, target):
+            if _tool_matches(rule.tool, friendly) and match_rule(rule, target):
                 return Decision.DENY, True, rule
         for rule in self.allow:
-            if _tool_matches(rule.tool, friendly) and match_pattern(rule.pattern, target):
+            if _tool_matches(rule.tool, friendly) and match_rule(rule, target):
                 return Decision.ALLOW, True, rule
         return Decision.ALLOW, False, None
 
 
-def parse_rule(value: str) -> tuple[Rule, bool]:
+def parse_rule(value: str) -> tuple[Rule | None, str | None]:
     text = value.strip()
     if not text:
-        return Rule("", "", False), False
+        return None, "empty rule"
     if "(" not in text and ")" not in text:
-        return Rule(text, "", True), True
+        return Rule(text, "", True), None
     if "(" not in text or not text.endswith(")"):
-        return Rule("", "", False), False
+        return None, "rule must be Tool(pattern) or Tool"
     tool, pattern = text.split("(", 1)
     tool = tool.strip()
-    pattern = pattern[:-1]
-    if not tool or "(" in pattern:
-        return Rule("", "", False), False
-    return Rule(tool, pattern.strip(), True), True
+    raw_pattern = pattern[:-1].strip()
+    if not tool:
+        return None, "missing tool name"
+    if raw_pattern == "":
+        return Rule(tool, "", True), None
+    try:
+        matcher = compile_matcher(raw_pattern, path_like=_path_like_tool(tool))
+    except ValueError as exc:
+        return None, str(exc)
+    return Rule(tool, allow=True, matcher=matcher, raw_pattern=raw_pattern), None
+
+
+def match_rule(rule: Rule, target: str) -> bool:
+    if rule.matcher is None:
+        return True
+    return rule.matcher.match(target)
 
 
 def match_pattern(pattern: str, target: str) -> bool:
     if pattern == "":
         return True
-    normalized_pattern = _normalize_pathish(pattern)
-    normalized_target = _normalize_pathish(target)
-    path_like = "/" in normalized_pattern or "/" in normalized_target
-    regex = (
-        _path_glob_to_regex(normalized_pattern) if path_like else _command_glob_to_regex(pattern)
-    )
-    candidate = normalized_target if path_like else target
-    return re.fullmatch(regex, candidate) is not None
-
-
-def escape_glob(value: str) -> str:
-    escaped: list[str] = []
-    for char in value:
-        if char in {"*", "?", "[", "]", "\\"}:
-            escaped.append("\\")
-        escaped.append(char)
-    return "".join(escaped)
+    try:
+        return compile_matcher(pattern, path_like=None).match(target)
+    except ValueError:
+        return match_glob(pattern, target, path_like=None)
 
 
 def _tool_matches(pattern: str, value: str) -> bool:
@@ -79,7 +125,7 @@ def _tool_matches(pattern: str, value: str) -> bool:
     if any(char in normalized_pattern for char in "*?"):
         return (
             re.fullmatch(
-                _command_glob_to_regex(normalized_pattern),
+                command_glob_to_regex(normalized_pattern),
                 normalized_value,
                 flags=re.IGNORECASE,
             )
@@ -89,51 +135,37 @@ def _tool_matches(pattern: str, value: str) -> bool:
 
 
 def _normalize_pathish(value: str) -> str:
-    normalized = value.replace("\\", "/")
-    while normalized.startswith("./"):
-        normalized = normalized[2:]
-    return normalized
+    return normalize_pathish(value)
 
 
 def _command_glob_to_regex(pattern: str) -> str:
-    parts: list[str] = []
-    index = 0
-    while index < len(pattern):
-        char = pattern[index]
-        if char == "\\" and index + 1 < len(pattern):
-            parts.append(re.escape(pattern[index + 1]))
-            index += 2
-            continue
-        if char == "*":
-            while index + 1 < len(pattern) and pattern[index + 1] == "*":
-                index += 1
-            parts.append(".*")
-        elif char == "?":
-            parts.append(".")
-        else:
-            parts.append(re.escape(char))
-        index += 1
-    return "".join(parts)
+    return command_glob_to_regex(pattern)
 
 
 def _path_glob_to_regex(pattern: str) -> str:
-    parts: list[str] = []
-    index = 0
-    while index < len(pattern):
-        char = pattern[index]
-        if char == "\\" and index + 1 < len(pattern):
-            parts.append(re.escape(pattern[index + 1]))
-            index += 2
-            continue
-        if char == "*":
-            if index + 1 < len(pattern) and pattern[index + 1] == "*":
-                parts.append(".*")
-                index += 2
-                continue
-            parts.append("[^/]*")
-        elif char == "?":
-            parts.append("[^/]")
-        else:
-            parts.append(re.escape(char))
-        index += 1
-    return "".join(parts)
+    return path_glob_to_regex(pattern)
+
+
+def _path_like_tool(tool: str) -> bool | None:
+    normalized = "".join(ch for ch in tool.casefold() if ch.isalnum())
+    if normalized in {
+        "read",
+        "readfile",
+        "readfiletool",
+        "write",
+        "writefile",
+        "writefiletool",
+        "edit",
+        "editfile",
+        "editfiletool",
+        "glob",
+        "globfiles",
+        "globfilestool",
+        "grep",
+        "searchcode",
+        "searchcodetool",
+    }:
+        return True
+    if normalized in {"bash", "runcommand"}:
+        return False
+    return None

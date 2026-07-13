@@ -1,4 +1,4 @@
-﻿# Skill System Spec
+# Skill System Spec
 
 ## Background
 

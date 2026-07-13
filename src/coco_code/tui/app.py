@@ -1,10 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import os
 import sys
 from contextlib import suppress
 from dataclasses import replace
+from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from time import monotonic, time
@@ -28,6 +29,7 @@ from coco_code.agent import (
     AgentRunRequest,
     AgentStopReason,
 )
+from coco_code.agent.agent_tool import AgentTool
 from coco_code.agent.runtime import SessionRuntime, new_session_runtime
 from coco_code.command import (
     CommandMemory,
@@ -47,6 +49,7 @@ from coco_code.compact.state import (
 from coco_code.compact.token import estimate_tokens
 from coco_code.config import Config, ConfigError, ProviderConfig, effective_context_window
 from coco_code.conversation import ChatMessage, Conversation
+from coco_code.hook import DispatchResult, Event, HookEngine
 from coco_code.llm import Provider, new_provider
 from coco_code.mcp import McpConfig, McpManager
 from coco_code.memory import MemoryManager
@@ -66,6 +69,10 @@ from coco_code.skills.catalog import USER_SKILLS_DIR, SkillCatalog
 from coco_code.skills.executor import SkillExecutor
 from coco_code.skills.render import render_active_skills_block
 from coco_code.skills.types import SkillCatalogItem
+from coco_code.subagent import Catalog as SubAgentCatalog
+from coco_code.subagent import load_catalog as load_subagent_catalog
+from coco_code.task import Manager as TaskManager
+from coco_code.task import SendMessageTool, TaskGetTool, TaskListTool, TaskStopTool
 from coco_code.tools import (
     ConfirmationPolicy,
     ToolCall,
@@ -75,6 +82,7 @@ from coco_code.tools import (
     create_default_registry,
 )
 from coco_code.tools.base import ConfirmCallback
+from coco_code.tools.ctx import with_cwd
 from coco_code.tools.executor import PermissionCallback
 from coco_code.tools.install_skill import InstallSkillTool
 from coco_code.tools.load_skill import LoadSkillTool
@@ -98,6 +106,8 @@ from coco_code.tui.view import (
     tool_result_block,
     user_block,
 )
+from coco_code.tui.worktree_adapter import WorktreeAdapter
+from coco_code.worktree import Manager as WorktreeManager
 
 DEFAULT_RESPONSE_TIMEOUT_SECONDS = 300.0
 
@@ -353,17 +363,29 @@ class CoCoCodeApp(App[None]):
         memory_manager: MemoryManager | None = None,
         session_writer: SessionWriter | None = None,
         show_startup_resume: bool = True,
+        hook_engine: HookEngine | None = None,
+        subagent_catalog: SubAgentCatalog | None = None,
+        task_manager: TaskManager | None = None,
+        worktree_mgr: WorktreeManager | None = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.cwd = cwd or Path.cwd()
+        self.worktree_mgr = worktree_mgr
+        self.active_cwd = ""
+        session = self.worktree_mgr.current_session() if self.worktree_mgr is not None else None
+        if session is not None:
+            self.active_cwd = session.worktree_path
         self.runtime = runtime or new_session_runtime(self.cwd, context_window=0)
+        self.hook_engine = hook_engine
         self.instruction_text = instruction_text
         self.memory_manager = memory_manager
         self.session_writer = session_writer
         self.show_startup_resume = show_startup_resume
         self._startup_resume_shown = False
         self.tool_registry = tool_registry or create_default_registry()
+        self.task_manager = task_manager or TaskManager()
+        self.subagent_catalog = subagent_catalog or load_subagent_catalog(self.cwd)
         self.skill_catalog = SkillCatalog.load(self.cwd)
         self._skills_catalog_text = self.skill_catalog.catalog_text()
         self._load_skill_tool = LoadSkillTool(self.skill_catalog, self.runtime.active_skills)
@@ -395,6 +417,8 @@ class CoCoCodeApp(App[None]):
             tool_timeout_seconds=self.tool_context.timeout_seconds,
             confirm_timeout_seconds=self.tool_context.confirm_timeout_seconds,
         )
+        self._agent_tool: AgentTool | None = None
+        self._register_subagent_tools()
         self.tool_executor = ToolExecutor(
             self.tool_registry,
             self.tool_context,
@@ -424,6 +448,7 @@ class CoCoCodeApp(App[None]):
         self._last_ctrl_c_handled_at = 0.0
         self._detached_turn_tasks: set[asyncio.Task[None]] = set()
         self._mcp_close_task: asyncio.Task[None] | None = None
+        self._task_done_consumer_task: asyncio.Task[None] | None = None
         self._force_exit_handle: asyncio.TimerHandle | None = None
 
     def compose(self) -> ComposeResult:
@@ -436,8 +461,48 @@ class CoCoCodeApp(App[None]):
         yield Static("", id="completion")
         yield Static("", id="status")
 
+    def _register_subagent_tools(self) -> None:
+        permission_callback = (
+            self.confirm_permission_call if self.permission_engine is not None else None
+        )
+        self._agent_tool = AgentTool(
+            catalog=self.subagent_catalog,
+            manager=self.task_manager,
+            registry=self.tool_registry,
+            tool_context=self.tool_context,
+            confirm_callback=self.confirm_tool_call,
+            provider_config_getter=lambda: self.active_cfg,
+            provider_configs_getter=lambda: tuple(self.config.providers),
+            conversation_getter=lambda: self.conversation,
+            runtime_getter=lambda: self.runtime,
+            permission_mode_getter=lambda: self.permission_mode,
+            prompt_builder=lambda cfg, runtime: self.build_current_system_prompt(cfg, runtime),
+            agent_limits=self.agent_limits,
+            permission_engine=self.permission_engine,
+            permission_callback=permission_callback,
+            hook_engine=self.hook_engine,
+            background_enabled=lambda: self.config.enable_subagent_background,
+            worktree_mgr=self.worktree_mgr,
+        )
+        for tool in (
+            TaskListTool(self.task_manager),
+            TaskGetTool(self.task_manager),
+            TaskStopTool(self.task_manager),
+            SendMessageTool(self.task_manager),
+            self._agent_tool,
+        ):
+            try:
+                self.tool_registry.get(tool.spec.name)
+            except ToolRegistryError:
+                self.tool_registry.register(tool)
+
     async def on_mount(self) -> None:
         self.timer = self.set_interval(1.0, self.refresh_streaming, pause=True)
+        self._task_done_consumer_task = asyncio.create_task(self._consume_task_done())
+        if self.worktree_mgr is not None:
+            asyncio.create_task(
+                self.worktree_mgr.sweep_stale(datetime.now() - timedelta(hours=24))
+            )
         asyncio.create_task(asyncio.to_thread(clean_expired_sessions, self.cwd))
         await self.start_mcp()
         self.setup_skills_after_tools_ready()
@@ -446,6 +511,30 @@ class CoCoCodeApp(App[None]):
         else:
             self.query_one("#input", PromptTextArea).disabled = True
             self.query_one(ProviderOptionList).focus()
+
+    async def _consume_task_done(self) -> None:
+        queue = self.task_manager.subscribe_done()
+        while True:
+            task_id = await queue.get()
+            task = self.task_manager.get(task_id)
+            if task is None:
+                continue
+            label = task.name or task.id
+            status = task.status.value
+            if status == "completed":
+                detail = f"SubAgent task {label} completed. Use TaskGet for the full result."
+                preview = task.result.strip()
+                if preview:
+                    if len(preview) > 500:
+                        preview = preview[:500] + "..."
+                    detail = f"{detail}\n{preview}"
+            elif status == "failed":
+                detail = f"SubAgent task {label} failed: {task.err}"
+            else:
+                detail = f"SubAgent task {label} {status}."
+            self.runtime.append_hook_reminders([detail])
+            with suppress(Exception):
+                self.query_one("#history", RichLog).write(notice_block(detail))
 
     async def start_mcp(self) -> None:
         if self.mcp_manager is None:
@@ -548,6 +637,50 @@ class CoCoCodeApp(App[None]):
             active_skills=render_active_skills_block(runtime.active_skills.snapshot()),
         )
 
+    async def _dispatch_hook(
+        self,
+        event: Event,
+        payload: dict[str, Any] | None = None,
+        runtime: SessionRuntime | None = None,
+    ) -> DispatchResult:
+        if self.hook_engine is None:
+            return DispatchResult()
+        active_runtime = runtime or self.runtime
+        merged = {
+            "event": event.value,
+            "session_id": active_runtime.session.session_id,
+            "cwd": str(self.cwd),
+            "mode": str(self.permission_mode),
+        }
+        if payload:
+            merged.update(payload)
+        result = await self.hook_engine.dispatch(event, merged, active_runtime)
+        if result.injected_prompts:
+            active_runtime.append_hook_reminders(result.injected_prompts)
+        return result
+
+    async def _dispatch_session_start(self) -> None:
+        await self._dispatch_hook(Event.SESSION_START)
+
+    async def _dispatch_session_end(self) -> None:
+        await self._dispatch_hook(Event.SESSION_END)
+
+    async def _dispatch_session_resume(self) -> None:
+        await self._dispatch_hook(Event.SESSION_RESUME)
+
+    async def clear_history_with_hooks(self) -> None:
+        await self._dispatch_session_end()
+        self.runtime.reset_hook_state()
+        self.clear_history()
+        await self._dispatch_session_start()
+
+    def hook_rules(self):
+        return [] if self.hook_engine is None else list(self.hook_engine.rules())
+
+    def hook_sources(self) -> list[str]:
+        if self.hook_engine is None:
+            return []
+        return [str(path) for path in self.hook_engine.sources()]
     @on(OptionList.OptionSelected)
     def provider_selected(self, event: OptionList.OptionSelected) -> None:
         if not isinstance(event.option_list, ProviderOptionList):
@@ -573,6 +706,19 @@ class CoCoCodeApp(App[None]):
             self.hide_completion()
             return
         if await dispatch_command(self, text):
+            return
+        result = await self._dispatch_hook(
+            Event.USER_PROMPT_SUBMIT,
+            {
+                "prompt": text,
+                "mode": str(self.permission_mode),
+            },
+        )
+        if result.blocked:
+            self.show_error(f"[hook {result.blocking_hook_name}] {result.reason}")
+            input_box = self.query_one("#input", PromptTextArea)
+            input_box.text = text
+            input_box.focus()
             return
         self.submit_user_text(text)
 
@@ -657,6 +803,7 @@ class CoCoCodeApp(App[None]):
         input_box.focus()
         self.state = SessionState.IDLE
         self.update_status()
+        asyncio.create_task(self._dispatch_session_start())
         self._maybe_show_startup_resume()
 
     def submit_user_text(
@@ -699,20 +846,22 @@ class CoCoCodeApp(App[None]):
     async def _run_agent_turn(self, request: AgentRunRequest, turn_token: int) -> None:
         assert self.provider is not None
         try:
-            loop = AgentLoop(
-                self.provider,
-                self.conversation,
-                self.tool_registry,
-                self.tool_executor,
-                self.agent_limits,
-                runtime=self.runtime,
-                memory_manager=self.memory_manager,
-                system_prompt_builder=self.build_current_system_prompt,
-            )
-            async for event in loop.run(request):
-                if not self.is_current_turn(turn_token):
-                    return
-                await self.handle_agent_event(event)
+            with with_cwd(self._effective_cwd()):
+                loop = AgentLoop(
+                    self.provider,
+                    self.conversation,
+                    self.tool_registry,
+                    self.tool_executor,
+                    self.agent_limits,
+                    runtime=self.runtime,
+                    memory_manager=self.memory_manager,
+                    system_prompt_builder=self.build_current_system_prompt,
+                    hook_engine=self.hook_engine,
+                )
+                async for event in loop.run(request):
+                    if not self.is_current_turn(turn_token):
+                        return
+                    await self.handle_agent_event(event)
         except asyncio.CancelledError:
             if not self._closing and self.is_current_turn(turn_token):
                 self.finish_cancelled_turn()
@@ -819,6 +968,7 @@ class CoCoCodeApp(App[None]):
         self.call_later(lambda: self.begin_resume(startup=True))
 
     async def _restore_session(self, info: SessionInfo) -> None:
+        await self._dispatch_session_end()
         history = self.query_one("#history", RichLog)
         paths = session_paths(self.cwd, info.session_id)
         restored_runtime = SessionRuntime(
@@ -853,6 +1003,7 @@ class CoCoCodeApp(App[None]):
                 system_prompt_builder=lambda: self.build_current_system_prompt(
                     runtime=restored_runtime
                 ),
+                hook_engine=self.hook_engine,
             )
             try:
                 await loop.run_force_compact(self.agent_mode)
@@ -883,6 +1034,7 @@ class CoCoCodeApp(App[None]):
         )
         history.write(notice_block(restored_notice))
         self.state = SessionState.IDLE
+        await self._dispatch_session_resume()
         self.update_status()
 
     async def run_manual_compact(self) -> None:
@@ -896,6 +1048,7 @@ class CoCoCodeApp(App[None]):
             self.agent_limits,
             runtime=self.runtime,
             system_prompt_builder=self.build_current_system_prompt,
+            hook_engine=self.hook_engine,
         )
         try:
             output = await loop.run_force_compact(self.agent_mode)
@@ -920,6 +1073,10 @@ class CoCoCodeApp(App[None]):
         return await result
 
     async def confirm_permission_call(self, call: ToolCall, spec: ToolSpec, reason: str) -> Outcome:
+        await self._dispatch_hook(
+            Event.NOTIFICATION,
+            {"kind": "approval", "detail": call.name},
+        )
         if self._permission_callback is not None:
             return await self._permission_callback(call, spec, reason)
         if self._confirm_callback is not None:
@@ -1010,6 +1167,9 @@ class CoCoCodeApp(App[None]):
             memory_update_task=self.runtime.memory_update_task,
             active_skills=self.runtime.active_skills,
             turn_tasks=self.runtime.turn_tasks,
+            pending_hook_reminders=list(self.runtime.pending_hook_reminders),
+            fired_hooks=set(self.runtime.fired_hooks),
+            hook_tasks=self.runtime.hook_tasks,
         )
         self._load_skill_tool.attach(self.skill_catalog, self.runtime.active_skills)
         self._register_skill_commands()
@@ -1152,6 +1312,17 @@ class CoCoCodeApp(App[None]):
             files=self.memory_manager.list_files(),
         )
 
+
+    def worktree_accessor(self):
+        if self.worktree_mgr is None:
+            return None
+        return WorktreeAdapter(self.worktree_mgr, self._set_active_cwd)
+
+    def _set_active_cwd(self, cwd: str) -> None:
+        self.active_cwd = cwd
+
+    def _effective_cwd(self) -> str:
+        return self.active_cwd or str(self.cwd)
     def is_idle(self) -> bool:
         return self.state == SessionState.IDLE
 
@@ -1215,6 +1386,8 @@ class CoCoCodeApp(App[None]):
         self.runtime.cancel_turn_tasks()
         if self.stream_task is not None and not self.stream_task.done():
             self.stream_task.cancel()
+        if self._task_done_consumer_task is not None and not self._task_done_consumer_task.done():
+            self._task_done_consumer_task.cancel()
         for task in tuple(self._detached_turn_tasks):
             if not task.done():
                 task.cancel()
@@ -1347,13 +1520,3 @@ def parse_agent_request(text: str) -> AgentRunRequest:
 
 def next_permission_mode(mode: PermissionMode) -> PermissionMode:
     return PermissionMode((int(mode) + 1) % len(PermissionMode))
-
-
-
-
-
-
-
-
-
-

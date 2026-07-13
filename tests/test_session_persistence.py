@@ -66,11 +66,11 @@ def test_list_and_cleanup_sessions(tmp_path: Path) -> None:
         paths.jsonl_path.write_text(
             '{"role":"user","content":"hello","ts":1,"model":"m"}\n', encoding="utf-8"
         )
-    legacy = tmp_path / ".mewcode" / "sessions" / "1717000000-abc12345"
+    legacy = tmp_path / ".coco-code" / "sessions" / "1717000000-abc12345"
     legacy.mkdir(parents=True)
     infos = list_sessions(tmp_path)
     assert {info.session_id for info in infos} == {old_id, fresh_id}
     clean_expired_sessions(tmp_path, max_age_days=30)
-    assert not (tmp_path / ".mewcode" / "sessions" / old_id).exists()
-    assert (tmp_path / ".mewcode" / "sessions" / fresh_id).exists()
+    assert not (tmp_path / ".coco-code" / "sessions" / old_id).exists()
+    assert (tmp_path / ".coco-code" / "sessions" / fresh_id).exists()
     assert legacy.exists()

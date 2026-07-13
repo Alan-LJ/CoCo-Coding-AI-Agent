@@ -62,7 +62,7 @@ def test_memory_manager_index_and_update(tmp_path: Path) -> None:
         manager = MemoryManager(tmp_path, provider=provider)
         await manager.update_async([ChatMessage(role="user", content="记住要测试")])
         assert provider.tools_seen == [None]
-        assert (tmp_path / ".mewcode" / "memory" / "project_knowledge_testing.md").exists()
+        assert (tmp_path / ".coco-code" / "memory" / "project_knowledge_testing.md").exists()
         index = manager.load_index_text()
         assert "项目级记忆" in index
         assert "Testing" in index

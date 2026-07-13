@@ -31,6 +31,7 @@ class ProviderConfig:
 @dataclass(frozen=True)
 class Config:
     providers: list[ProviderConfig]
+    enable_subagent_background: bool = True
 
 
 def default_config_paths(cwd: Path | None = None) -> list[Path]:
@@ -112,7 +113,15 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         raise ConfigError("配置缺少非空 providers 列表")
 
     providers = [_parse_provider(index, item) for index, item in enumerate(providers_raw)]
-    return Config(providers=providers)
+    return Config(
+        providers=providers,
+        enable_subagent_background=_optional_bool(
+            raw,
+            "enableSubAgentBackground",
+            fallback_key="enable_subagent_background",
+            default=True,
+        ),
+    )
 
 
 def _parse_provider(index: int, raw: Any) -> ProviderConfig:
@@ -167,4 +176,21 @@ def _optional_non_negative_int(raw: dict[str, Any], field: str, index: int) -> i
         raise ConfigError(f"providers[{index}].{field} 必须是非负整数")
     if value < 0:
         raise ConfigError(f"providers[{index}].{field} 必须是非负整数")
+    return value
+
+
+def _optional_bool(
+    raw: dict[str, Any],
+    field: str,
+    *,
+    fallback_key: str | None = None,
+    default: bool,
+) -> bool:
+    value = raw.get(field)
+    if value is None and fallback_key is not None:
+        value = raw.get(fallback_key)
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise ConfigError(f"{field} must be a boolean")
     return value

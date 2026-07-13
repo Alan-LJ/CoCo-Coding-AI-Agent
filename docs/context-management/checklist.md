@@ -19,7 +19,7 @@
 
 - [ ] **C3**：会话状态构造函数返回完整实例，并自动建立落盘目录。
   - 验证：运行最小程序调用 `new_session_context(Path.cwd())`，返回的 `session_id` 形如 `<unix_ts>-<hex>`。
-  - 验证：返回的 `spill_dir` 指向 `.mewcode/sessions/<session_id>/tool-results/`，且物理目录存在。
+  - 验证：返回的 `spill_dir` 指向 `.coco-code/sessions/<session_id>/tool-results/`，且物理目录存在。
   - 验证：连续调用两次得到不同 `session_id`。
 
 - [ ] **C4**：替换决策账本提供“已见”和“已替换”两本独立簿子。
@@ -167,10 +167,10 @@
   - 验证：打开示例文件，能看到 `context_window` 字段和“未配置时按 protocol 默认”的说明。
   - 验证：`python -c "import yaml, pathlib; yaml.safe_load(pathlib.Path('.coco-code/config.yaml.example').read_text(encoding='utf-8'))"` 不报错。
 
-- [ ] **I11**：进程启动后 `.mewcode/sessions/<id>/tool-results/` 物理目录被创建，并被 Git 忽略。
-  - 验证：启动后 `Get-ChildItem .mewcode/sessions` 出现新子目录，子目录名形如 `<unix_ts>-<hex>`。
+- [ ] **I11**：进程启动后 `.coco-code/sessions/<id>/tool-results/` 物理目录被创建，并被 Git 忽略。
+  - 验证：启动后 `Get-ChildItem .coco-code/sessions` 出现新子目录，子目录名形如 `<unix_ts>-<hex>`。
   - 验证：进程退出后该目录依然保留，下次启动会再开新子目录。
-  - 验证：创建 `.mewcode/sessions/x/tool-results/y` 后，`git status --short` 不显示该路径。
+  - 验证：创建 `.coco-code/sessions/x/tool-results/y` 后，`git status --short` 不显示该路径。
 
 ### compact 状态事件
 
@@ -236,7 +236,7 @@
 ### 场景 E2：单条大工具结果
 
 - [ ] **触发**：fake provider 一轮返回一个工具调用，工具回填 80KB 字符串。
-- [ ] **预期**：下一轮 stream 请求中，该工具结果 content 已被替换为预览体；`.mewcode/sessions/<id>/tool-results/<tool_call_id>` 文件存在，大小可还原完整 payload。
+- [ ] **预期**：下一轮 stream 请求中，该工具结果 content 已被替换为预览体；`.coco-code/sessions/<id>/tool-results/<tool_call_id>` 文件存在，大小可还原完整 payload。
 - [ ] **观察方式**：捕获第 N+1 次 stream 请求体检查预览字段；用 `Path(...).stat().st_size` 检查落盘文件。
 
 ### 场景 E3：单轮聚合超标
@@ -311,10 +311,10 @@
 ### 场景 E12：真实运行冒烟
 
 - [ ] **触发**：安装依赖后启动 `python -m coco_code`，使用一个可工作的 provider 配置。
-- [ ] **预期**：让 Agent 读取一个超过 50KB 的本地文件后，`.mewcode/sessions/<id>/tool-results/` 下出现对应落盘文件。
+- [ ] **预期**：让 Agent 读取一个超过 50KB 的本地文件后，`.coco-code/sessions/<id>/tool-results/` 下出现对应落盘文件。
 - [ ] **预期**：把 `context_window` 临时改成 80000，连续几轮对话后能看到自动压缩状态提示。
 - [ ] **预期**：输入 `/compact` 看到 token 对比消息；输入 `/unknown` 看到友好提示，未发 LLM；输入 `/exit`、`/plan`、`/do` 行为与迁移前一致。
-- [ ] **观察方式**：TUI 目测；用 `Get-ChildItem .mewcode/sessions` 和 `git status --short` 抽查落盘目录未进入 Git。
+- [ ] **观察方式**：TUI 目测；用 `Get-ChildItem .coco-code/sessions` 和 `git status --short` 抽查落盘目录未进入 Git。
 
 ### 场景 E13：自动压缩 UX 状态提示
 

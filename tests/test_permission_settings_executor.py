@@ -9,11 +9,14 @@ from coco_code.permission import Decision, Mode, Outcome, new_engine
 from coco_code.permission.engine import Engine
 from coco_code.permission.persist import persist_local_allow
 from coco_code.permission.settings import (
+    PermissionsBlock,
+    Settings,
     SettingsError,
     categorize,
     extract_target,
     friendly_name,
     load_settings,
+    to_rule_set,
 )
 from coco_code.tools import ToolCall, ToolContext, ToolExecutor, create_default_registry
 
@@ -40,6 +43,23 @@ def test_settings_mapping_and_target_extraction() -> None:
         False,
         True,
     )
+
+
+def test_to_rule_set_logs_and_skips_bad_rules(capsys: pytest.CaptureFixture[str]) -> None:
+    settings = Settings(
+        permissions=PermissionsBlock(
+            allow=["Bash(~[invalid)", "Bash(=git status)"],
+            deny=["Write(**/*.py)"],
+        )
+    )
+
+    rules = to_rule_set(settings)
+
+    captured = capsys.readouterr()
+    assert "parse failed" in captured.err
+    assert len(rules.allow) == 1
+    assert len(rules.deny) == 1
+    assert rules.match("Bash", "git status") == (Decision.ALLOW, True)
 
 
 def test_persist_local_allow_writes_exact_rule_and_reloads(tmp_path: Path) -> None:

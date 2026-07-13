@@ -1,4 +1,4 @@
-﻿# Skill System Tasks
+# Skill System Tasks
 
 > Execute in order. After each implementation task, run the focused tests named in that task before moving on. Run the full suite after the TUI integration tasks.
 

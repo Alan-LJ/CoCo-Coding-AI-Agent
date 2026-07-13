@@ -27,7 +27,7 @@
 | 新建 | `src/coco_code/tui/commands.py` | `/exit`、`/plan`、`/do`、`/compact` 命令分发 |
 | 修改 | `src/coco_code/tui/app.py` | runtime 持有、命令路由、compact notice |
 | 修改/新建 | `.coco-code/config.yaml.example` | `context_window` 示例 |
-| 修改 | `.gitignore` | 显式忽略 `.mewcode/sessions/` |
+| 修改 | `.gitignore` | 显式忽略 `.coco-code/sessions/` |
 | 新建/修改 | `tests/test_compact_*.py` | compact 各模块单测 |
 | 修改 | `tests/test_conversation.py` | `replace_items` 测试 |
 | 修改 | `tests/test_config.py` | `context_window` 测试 |
@@ -56,7 +56,7 @@
 1. 新建 `state.py`，定义 `SessionContext(session_id: str, spill_dir: Path)`。
 2. 实现 `new_session_context(workspace: Path) -> SessionContext`。
 3. session id 使用 `<unix_ts>-<short_random>` 格式，随机部分用 `secrets.token_hex(4)`。
-4. 创建 `.mewcode/sessions/<session_id>/tool-results/`，目录已存在时不报错。
+4. 创建 `.coco-code/sessions/<session_id>/tool-results/`，目录已存在时不报错。
 
 **验证**：临时调用 `new_session_context(Path.cwd())`，确认返回路径存在且包含 `tool-results`。
 
@@ -403,7 +403,7 @@
 2. 把 runtime 传给 `CoCoCodeApp`。
 3. 单 provider 时可提前设置 context window；多 provider 时由 app 激活 provider 后设置。
 
-**验证**：启动 app 后 `.mewcode/sessions/<id>/tool-results/` 目录存在。
+**验证**：启动 app 后 `.coco-code/sessions/<id>/tool-results/` 目录存在。
 
 ## T29: 更新配置示例和 gitignore
 
@@ -413,9 +413,9 @@
 **步骤**：
 1. 如果 `.coco-code/config.yaml.example` 不存在，按 README 中的配置示例创建。
 2. 在 provider 示例中加入 `context_window` 注释。
-3. `.gitignore` 显式追加 `.mewcode/sessions/`。
+3. `.gitignore` 显式追加 `.coco-code/sessions/`。
 
-**验证**：`python -c "import yaml, pathlib; yaml.safe_load(pathlib.Path('.coco-code/config.yaml.example').read_text(encoding='utf-8'))"` 不报错；创建 `.mewcode/sessions/x/tool-results/y` 后 `git status --short` 不显示该路径。
+**验证**：`python -c "import yaml, pathlib; yaml.safe_load(pathlib.Path('.coco-code/config.yaml.example').read_text(encoding='utf-8'))"` 不报错；创建 `.coco-code/sessions/x/tool-results/y` 后 `git status --short` 不显示该路径。
 
 ## T30: compact 单元测试补齐
 
@@ -480,13 +480,13 @@ python -m pytest
 **步骤**：
 1. 使用临时配置把 `context_window` 设为较小但大于 33000 的值。
 2. 启动 `python -m coco_code`。
-3. 读取一个超过 50000 字节的文件，确认 `.mewcode/sessions/<id>/tool-results/<tool_call_id>` 写入。
+3. 读取一个超过 50000 字节的文件，确认 `.coco-code/sessions/<id>/tool-results/<tool_call_id>` 写入。
 4. 下一轮确认工具结果以预览形式回放。
 5. 输入 `/compact`，确认显示 token 变化。
 6. 输入 `/unknown`，确认不发送给 LLM。
 7. 人工触发或 mock `prompt_too_long`，确认紧急压缩只重试一次。
 
-**验证**：完成以上步骤，TUI 不崩溃，`git status --short` 不显示 `.mewcode/sessions/`。
+**验证**：完成以上步骤，TUI 不崩溃，`git status --short` 不显示 `.coco-code/sessions/`。
 
 ## 执行顺序
 

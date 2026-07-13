@@ -1,4 +1,4 @@
-﻿# Skill System Plan
+# Skill System Plan
 
 ## Architecture Overview
 

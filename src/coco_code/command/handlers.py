@@ -105,7 +105,11 @@ async def handle_compact(context: CommandContext, ui: CommandUI) -> None:  # noq
 
 
 async def handle_clear(context: CommandContext, ui: CommandUI) -> None:  # noqa: ARG001
-    ui.clear_history()
+    clear_with_hooks = getattr(ui, "clear_history_with_hooks", None)
+    if callable(clear_with_hooks):
+        await clear_with_hooks()
+    else:
+        ui.clear_history()
     ui.show_message("Cleared the visible history.")
 
 
@@ -161,3 +165,30 @@ async def handle_resume(context: CommandContext, ui: CommandUI) -> None:  # noqa
 
 async def handle_tools(context: CommandContext, ui: CommandUI) -> None:  # noqa: ARG001
     ui.show_tools()
+
+
+async def handle_hooks(context: CommandContext, ui: CommandUI) -> None:  # noqa: ARG001
+    rules = ui.hook_rules()
+    if not rules:
+        ui.show_message("No hooks loaded.")
+        return
+    grouped: dict[str, list[object]] = {}
+    for rule in rules:
+        event = getattr(getattr(rule, "event", None), "value", str(getattr(rule, "event", "")))
+        grouped.setdefault(event, []).append(rule)
+    lines = ["Hooks:"]
+    for event, event_rules in grouped.items():
+        lines.append(f"{event}:")
+        for rule in event_rules:
+            flags = []
+            if getattr(rule, "only_once", False):
+                flags.append("[once]")
+            if getattr(rule, "async_mode", False):
+                flags.append("[async]")
+            action = getattr(getattr(rule, "action", None), "type", "")
+            suffix = " " + " ".join(flags) if flags else ""
+            lines.append(f"  {getattr(rule, 'name', '')}  {event}  {action}{suffix}")
+    sources = ui.hook_sources()
+    if sources:
+        lines.append("Loaded from: " + ", ".join(sources))
+    ui.show_message("\n".join(lines))

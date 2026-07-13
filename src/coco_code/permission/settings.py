@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TextIO
 
 import yaml
 
@@ -47,16 +48,35 @@ def load_settings(path: str | Path) -> Settings:
     return _parse_settings(raw, settings_path)
 
 
-def to_rule_set(settings: Settings) -> RuleSet:
+def to_rule_set(settings: Settings, stderr: TextIO | None = None) -> RuleSet:
+    stderr = stderr or sys.stderr
     rule_set = RuleSet()
     for text in settings.permissions.allow:
-        rule, ok = parse_rule(text)
-        if ok:
-            rule_set.allow.append(Rule(friendly_name(rule.tool), rule.pattern, True))
+        rule, err = parse_rule(text)
+        if rule is None:
+            print(f"rule {text!r} parse failed: {err}", file=stderr)
+            continue
+        rule_set.allow.append(
+            Rule(
+                friendly_name(rule.tool),
+                allow=True,
+                matcher=rule.matcher,
+                raw_pattern=rule.pattern,
+            )
+        )
     for text in settings.permissions.deny:
-        rule, ok = parse_rule(text)
-        if ok:
-            rule_set.deny.append(Rule(friendly_name(rule.tool), rule.pattern, False))
+        rule, err = parse_rule(text)
+        if rule is None:
+            print(f"rule {text!r} parse failed: {err}", file=stderr)
+            continue
+        rule_set.deny.append(
+            Rule(
+                friendly_name(rule.tool),
+                allow=False,
+                matcher=rule.matcher,
+                raw_pattern=rule.pattern,
+            )
+        )
     return rule_set
 
 

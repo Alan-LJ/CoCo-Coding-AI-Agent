@@ -18,6 +18,7 @@ from coco_code.tools.base import (
     ToolResult,
     ToolSpec,
 )
+from coco_code.tools.ctx import workspace_from_ctx
 from coco_code.tools.safety import (
     ToolSafetyError,
     ensure_text_file,
@@ -107,6 +108,7 @@ def _optional_float(params: ToolParams, name: str, default: float, maximum: floa
 
 
 async def _create_command_process(command: str, context: ToolContext) -> asyncio.subprocess.Process:
+    workspace = workspace_from_ctx(context.workspace)
     if os.name == "nt":
         return await asyncio.create_subprocess_exec(
             "powershell.exe",
@@ -115,14 +117,14 @@ async def _create_command_process(command: str, context: ToolContext) -> asyncio
             "Bypass",
             "-Command",
             command,
-            cwd=context.workspace,
+            cwd=workspace,
             env=_safe_command_env(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
     return await asyncio.create_subprocess_shell(
         command,
-        cwd=context.workspace,
+        cwd=workspace,
         env=_safe_command_env(),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -165,7 +167,8 @@ class ReadFileTool:
     async def run(self, params: ToolParams, context: ToolContext) -> ToolResult:
         started = monotonic()
         try:
-            path = resolve_workspace_path(context.workspace, _required_str(params, "path"))
+            workspace = workspace_from_ctx(context.workspace)
+            path = resolve_workspace_path(workspace, _required_str(params, "path"))
             max_chars = _optional_int(
                 params, "max_chars", context.max_output_chars, context.max_output_chars
             )
@@ -173,9 +176,9 @@ class ReadFileTool:
             output, truncated = truncate_text(content, max_chars)
             return _success(
                 self.spec.name,
-                f"已读取文件 {_relative_path(path, context.workspace)}。",
+                f"已读取文件 {_relative_path(path, workspace)}。",
                 {
-                    "path": _relative_path(path, context.workspace),
+                    "path": _relative_path(path, workspace),
                     "content": output,
                     "size_chars": len(content),
                     "truncated": truncated,
@@ -212,7 +215,8 @@ class WriteFileTool:
     async def run(self, params: ToolParams, context: ToolContext) -> ToolResult:
         started = monotonic()
         try:
-            path = resolve_workspace_path(context.workspace, _required_str(params, "path"))
+            workspace = workspace_from_ctx(context.workspace)
+            path = resolve_workspace_path(workspace, _required_str(params, "path"))
             content = _required_str(params, "content")
             overwrite = _optional_bool(params, "overwrite", False)
             if path.exists() and not path.is_file():
@@ -224,9 +228,9 @@ class WriteFileTool:
             path.write_text(content, encoding="utf-8")
             return _success(
                 self.spec.name,
-                f"已写入文件 {_relative_path(path, context.workspace)}。",
+                f"已写入文件 {_relative_path(path, workspace)}。",
                 {
-                    "path": _relative_path(path, context.workspace),
+                    "path": _relative_path(path, workspace),
                     "chars_written": len(content),
                     "overwrote": existed,
                 },
@@ -261,7 +265,8 @@ class EditFileTool:
     async def run(self, params: ToolParams, context: ToolContext) -> ToolResult:
         started = monotonic()
         try:
-            path = resolve_workspace_path(context.workspace, _required_str(params, "path"))
+            workspace = workspace_from_ctx(context.workspace)
+            path = resolve_workspace_path(workspace, _required_str(params, "path"))
             old_text = _required_str(params, "old_text")
             new_text = params.get("new_text")
             if not isinstance(new_text, str):
@@ -274,9 +279,9 @@ class EditFileTool:
             path.write_text(updated, encoding="utf-8")
             return _success(
                 self.spec.name,
-                f"已修改文件 {_relative_path(path, context.workspace)}。",
+                f"已修改文件 {_relative_path(path, workspace)}。",
                 {
-                    "path": _relative_path(path, context.workspace),
+                    "path": _relative_path(path, workspace),
                     "old_chars": len(old_text),
                     "new_chars": len(new_text),
                 },
@@ -404,6 +409,7 @@ class GlobFilesTool:
     async def run(self, params: ToolParams, context: ToolContext) -> ToolResult:
         started = monotonic()
         try:
+            workspace = workspace_from_ctx(context.workspace)
             pattern = _required_str(params, "pattern")
             if Path(pattern).is_absolute() or has_parent_traversal(pattern):
                 raise ToolSafetyError("glob 模式必须是工作区内相对路径，且不能包含 `..`。")
@@ -411,16 +417,16 @@ class GlobFilesTool:
                 params, "max_results", context.max_search_results, context.max_search_results
             )
             matches: list[str] = []
-            for path in sorted(context.workspace.glob(pattern), key=lambda item: item.as_posix()):
-                if not path.is_file() or is_ignored_path(path, context.workspace):
+            for path in sorted(workspace.glob(pattern), key=lambda item: item.as_posix()):
+                if not path.is_file() or is_ignored_path(path, workspace):
                     continue
-                matches.append(_relative_path(path, context.workspace))
+                matches.append(_relative_path(path, workspace))
                 if len(matches) >= max_results:
                     break
             total = sum(
                 1
-                for path in context.workspace.glob(pattern)
-                if path.is_file() and not is_ignored_path(path, context.workspace)
+                for path in workspace.glob(pattern)
+                if path.is_file() and not is_ignored_path(path, workspace)
             )
             truncated = total > len(matches)
             return _success(
@@ -460,6 +466,7 @@ class SearchCodeTool:
     async def run(self, params: ToolParams, context: ToolContext) -> ToolResult:
         started = monotonic()
         try:
+            workspace = workspace_from_ctx(context.workspace)
             pattern = _required_str(params, "pattern")
             path_glob = params.get("path_glob", "**/*")
             if not isinstance(path_glob, str) or path_glob == "":
@@ -473,8 +480,8 @@ class SearchCodeTool:
             matcher = re.compile(pattern) if regex else None
             results: list[dict[str, Any]] = []
             total = 0
-            for path in _iter_candidate_files(context.workspace, path_glob):
-                if is_ignored_path(path, context.workspace):
+            for path in _iter_candidate_files(workspace, path_glob):
+                if is_ignored_path(path, workspace):
                     continue
                 try:
                     content = ensure_text_file(path)
@@ -489,7 +496,7 @@ class SearchCodeTool:
                         snippet, snippet_truncated = truncate_text(line, 240)
                         results.append(
                             {
-                                "path": _relative_path(path, context.workspace),
+                                "path": _relative_path(path, workspace),
                                 "line": line_no,
                                 "snippet": snippet,
                                 "truncated": snippet_truncated,

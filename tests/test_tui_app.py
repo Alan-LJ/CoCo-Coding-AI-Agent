@@ -31,7 +31,7 @@ def test_single_provider_app_mounts_headless() -> None:
 
 def test_startup_resume_new_session_does_not_trigger_provider_selection(tmp_path: Path) -> None:
     async def run() -> None:
-        session_dir = tmp_path / ".mewcode" / "sessions" / "20260705-120000-abcd"
+        session_dir = tmp_path / ".coco-code" / "sessions" / "20260705-120000-abcd"
         session_dir.mkdir(parents=True)
         (session_dir / "conversation.jsonl").write_text(
             '{"role":"user","content":"old session","ts":1,"model":"m"}\n',

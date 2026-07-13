@@ -11,6 +11,7 @@ from coco_code.tools.base import (
     ToolResult,
     ToolSpec,
 )
+from coco_code.tools.ctx import cwd_from_ctx, resolve_path, with_cwd
 from coco_code.tools.executor import ToolExecutor
 from coco_code.tools.registry import ToolRegistry, create_default_registry
 
@@ -24,7 +25,10 @@ __all__ = [
     "ToolParams",
     "ToolResult",
     "ToolSpec",
+    "cwd_from_ctx",
+    "resolve_path",
     "ToolExecutor",
     "ToolRegistry",
     "create_default_registry",
+    "with_cwd",
 ]

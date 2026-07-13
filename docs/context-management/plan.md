@@ -1,6 +1,6 @@
 # Context Management Plan
 
-> 本计划以用户提供的 ch08 上下文管理 Spec 为准。参考稿中的 `mewcode` 路径在当前仓库中落到 `coco_code` 包；参考稿中的 RoleTool 批量结构在当前仓库中落到 `ConversationItem` 序列上的 `AssistantToolCallItem` / `AssistantToolCallsItem` / `ToolResultItem`。
+> 本计划以用户提供的 ch08 上下文管理 Spec 为准。参考稿中的 `coco-code` 路径在当前仓库中落到 `coco_code` 包；参考稿中的 RoleTool 批量结构在当前仓库中落到 `ConversationItem` 序列上的 `AssistantToolCallItem` / `AssistantToolCallsItem` / `ToolResultItem`。
 
 ## 架构概览
 
@@ -52,7 +52,7 @@ class SessionRuntime:
 - `replacement`：工具结果替换决策账本。
 - `recovery`：最近成功读取文件的快照状态。
 - `circuit_breaker`：自动摘要连续失败计数。
-- `session`：本进程会话 id 和 `.mewcode/sessions/<session_id>/tool-results/` 路径。
+- `session`：本进程会话 id 和 `.coco-code/sessions/<session_id>/tool-results/` 路径。
 - `context_window`：当前 provider 的上下文窗口，provider 选定后写入。
 - `usage_anchor`：最近一次主对话 provider 请求返回的真实 usage 合计；摘要请求不更新它。
 - `anchor_item_len`：记录 usage anchor 时的 `Conversation.items()` 长度。
@@ -105,7 +105,7 @@ class SessionContext:
 def new_session_context(workspace: Path) -> SessionContext: ...
 ```
 
-`new_session_context` 生成 `<unix_ts>-<short_random>`，创建 `.mewcode/sessions/<session_id>/tool-results/`。进程退出不自动清理该目录。
+`new_session_context` 生成 `<unix_ts>-<short_random>`，创建 `.coco-code/sessions/<session_id>/tool-results/`。进程退出不自动清理该目录。
 
 ### `FileReadRecord` / `RecoveryState`
 
@@ -478,7 +478,7 @@ async def handle_compact(app: CoCoCodeApp) -> None: ...
 
 ### `.gitignore`
 
-追加 `.mewcode/sessions/`。当前 `.mew*/` 已覆盖该目录，但显式追加能让行为更清楚。
+追加 `.coco-code/sessions/`。当前 `.mew*/` 已覆盖该目录，但显式追加能让行为更清楚。
 
 ## 模块交互
 
@@ -599,7 +599,7 @@ tests/
 | 决策点 | 选择 | 理由 |
 |---|---|---|
 | 子包命名 | `coco_code.compact` | 与当前仓库包名一致，保留参考 plan 的职责边界。 |
-| 会话目录 | `.mewcode/sessions/<session_id>/tool-results/` | 按用户提供的 spec 执行；当前 `.gitignore` 的 `.mew*/` 已覆盖，仍显式追加更清楚。 |
+| 会话目录 | `.coco-code/sessions/<session_id>/tool-results/` | 按用户提供的 spec 执行；当前 `.gitignore` 的 `.mew*/` 已覆盖，仍显式追加更清楚。 |
 | 工具结果替换粒度 | 替换 `ToolResultItem.result` 为新的 `ToolResult` | 当前 conversation 结构没有 RoleTool；保持 tool_call_id 和顺序即可满足 provider 协议。 |
 | 批次识别 | 根据 `AssistantToolCallItem(s)` 后续的 `ToolResultItem` 分组 | 与当前 AgentLoop 写入顺序一致，不需要改 conversation schema。 |
 | 替换账本 | 保存 `tool_call_id -> ToolResult` | 预览必须逐字节稳定；保存对象比每轮重新生成字符串更可靠。 |
@@ -620,7 +620,7 @@ tests/
 | Spec 区域 | Plan 归属 |
 |---|---|
 | 第 1 层单条 / 聚合落盘、预览、账本冻结 | `compact/layer1.py` + `compact/state.py` |
-| `.mewcode/sessions` 会话目录 | `SessionContext` + `.gitignore` |
+| `.coco-code/sessions` 会话目录 | `SessionContext` + `.gitignore` |
 | 近似 token 估算和 usage 锚点 | `compact/token.py` + Agent Loop usage 更新 |
 | 自动摘要阈值和熔断 | `compact/manager.py` + `compact/layer2.py` + `CompactCircuitBreaker` |
 | 摘要 prompt、禁工具、9 部分结构 | `compact/summary_prompt.py` |

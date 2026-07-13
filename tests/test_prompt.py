@@ -52,3 +52,14 @@ def test_system_prompt_injects_memory_and_instructions() -> None:
     assert "Project Instructions" in prompt
     assert "Memory index" in prompt
     assert "Project rules" in prompt
+
+
+def test_system_prompt_injects_hook_reminders() -> None:
+    provider = ProviderConfig(name="OpenAI", protocol="openai", model="gpt-test")
+    prompt = build_system_prompt(
+        Path("P:/AI/CoCo Code_Agent"),
+        provider,
+        hook_reminders="Use zh-CN",
+    )
+    assert "Hook Reminders" in prompt
+    assert "Use zh-CN" in prompt

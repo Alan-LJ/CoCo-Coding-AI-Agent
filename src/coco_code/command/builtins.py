@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from coco_code.command.builtin_worktree import handle_worktree
 from coco_code.command.handlers import (
     handle_clear,
     handle_compact,
     handle_do,
     handle_exit,
+    handle_hooks,
     handle_memory,
     handle_permission,
     handle_plan,
@@ -22,11 +24,13 @@ PUBLIC_COMMAND_NAMES = (
     "compact",
     "do",
     "help",
+    "hooks",
     "memory",
     "permission",
     "plan",
     "session",
     "status",
+    "worktree",
 )
 
 
@@ -90,6 +94,15 @@ def _register_public(registry: CommandRegistry) -> None:
     )
     registry.register(
         Command(
+            name="hooks",
+            description="List loaded lifecycle hooks.",
+            usage="/hooks",
+            kind=CommandKind.LOCAL,
+            handler=handle_hooks,
+        )
+    )
+    registry.register(
+        Command(
             name="session",
             description="Show current session details.",
             usage="/session",
@@ -116,6 +129,17 @@ def _register_public(registry: CommandRegistry) -> None:
             argument_hint="default, acceptEdits, plan, or bypassPermissions.",
             kind=CommandKind.LOCAL,
             handler=handle_permission,
+        )
+    )
+    registry.register(
+        Command(
+            name="worktree",
+            aliases=("wt",),
+            description="Create, enter, list, exit, or remove Git worktrees.",
+            usage="/worktree <create|list|enter|exit|remove> ...",
+            argument_hint="create/list/enter/exit/remove",
+            kind=CommandKind.LOCAL,
+            handler=handle_worktree,
         )
     )
     registry.register(

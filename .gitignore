@@ -45,3 +45,7 @@ TestAgentRun/
 text.txt
 %SystemDrive%/
 .mewcode/sessions/
+
+# Worktree isolation copies
+.coco-code/worktrees/
+.coco-code/worktree_session.json

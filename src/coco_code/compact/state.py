@@ -22,12 +22,12 @@ class SessionContext:
 
 def new_session_context(workspace: Path) -> SessionContext:
     session_id = new_session_id()
-    session_dir = workspace / ".mewcode" / "sessions" / session_id
+    session_dir = workspace / ".coco-code" / "sessions" / session_id
     spill_dir = session_dir / "tool-results"
     try:
         spill_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
-        session_dir = Path.cwd() / ".mewcode" / "sessions" / session_id
+        session_dir = Path.cwd() / ".coco-code" / "sessions" / session_id
         spill_dir = session_dir / "tool-results"
         spill_dir.mkdir(parents=True, exist_ok=True)
     return SessionContext(session_id=session_id, session_dir=session_dir, spill_dir=spill_dir)
@@ -39,7 +39,7 @@ def new_session_id(now: datetime | None = None) -> str:
 
 
 def open_session_context(workspace: Path, session_id: str) -> SessionContext:
-    session_dir = workspace / ".mewcode" / "sessions" / session_id
+    session_dir = workspace / ".coco-code" / "sessions" / session_id
     return SessionContext(
         session_id=session_id,
         session_dir=session_dir,

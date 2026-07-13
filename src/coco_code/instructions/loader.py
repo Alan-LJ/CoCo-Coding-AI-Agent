@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-INSTRUCTION_FILE = "MEWCODE.md"
+INSTRUCTION_FILE = "COCO_CODE.md"
 DEPTH_WARNING = "@include 超过最大嵌套深度，已跳过"
 CYCLE_WARNING = "@include 检测到环路，已跳过"
 BOUNDARY_WARNING = "@include 路径超出允许范围，已跳过"
@@ -113,7 +113,7 @@ class InstructionLoader:
         return InstructionLoadResult(content="\n".join(lines), warnings=tuple(warnings))
 
     def _layers(self) -> list[InstructionLayer]:
-        user_boundary = self.user_home / ".mewcode"
+        user_boundary = self.user_home / ".coco-code"
         return [
             InstructionLayer(
                 name="project-root",
@@ -123,7 +123,7 @@ class InstructionLoader:
             ),
             InstructionLayer(
                 name="project-config",
-                path=self.project_root / ".mewcode" / INSTRUCTION_FILE,
+                path=self.project_root / ".coco-code" / INSTRUCTION_FILE,
                 boundary=self.project_root,
                 priority=80,
             ),

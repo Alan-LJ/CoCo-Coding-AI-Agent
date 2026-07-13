@@ -11,7 +11,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 def clean_expired_sessions(workspace: Path, max_age_days: int = 30) -> None:
-    sessions_dir = workspace / ".mewcode" / "sessions"
+    sessions_dir = workspace / ".coco-code" / "sessions"
     if not sessions_dir.exists():
         return
     cutoff = datetime.now() - timedelta(days=max_age_days)

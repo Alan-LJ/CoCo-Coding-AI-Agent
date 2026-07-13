@@ -1,8 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from pathlib import Path
+from typing import Any
 
 from coco_code.agent.runtime import SessionRuntime, new_session_runtime
 from coco_code.agent.stream import collect_stream_turn
@@ -34,10 +35,12 @@ from coco_code.compact.manager import (
 )
 from coco_code.compact.token import estimate_tokens, usage_anchor
 from coco_code.conversation import ChatMessage, Conversation, ConversationItem
+from coco_code.hook import DispatchResult, Event, HookEngine
 from coco_code.llm import PromptTooLongError, Provider
 from coco_code.memory import MemoryManager
 from coco_code.permission import Mode as PermissionMode
 from coco_code.tools.base import ToolCall, ToolResult
+from coco_code.tools.ctx import cwd_from_ctx
 from coco_code.tools.executor import ToolExecutor
 from coco_code.tools.registry import ToolRegistry
 
@@ -57,6 +60,7 @@ class AgentLoop:
         runtime: SessionRuntime | None = None,
         memory_manager: MemoryManager | None = None,
         system_prompt_builder: SystemPromptBuilder | None = None,
+        hook_engine: HookEngine | None = None,
     ) -> None:
         self._provider = provider
         self._conversation = conversation
@@ -67,6 +71,7 @@ class AgentLoop:
         self._workspace = _workspace_from_executor(executor)
         self._memory_manager = memory_manager
         self._system_prompt_builder = system_prompt_builder
+        self._hook_engine = hook_engine
         self._runtime = runtime or new_session_runtime(
             self._workspace,
             _default_context_window(provider.protocol),
@@ -83,7 +88,8 @@ class AgentLoop:
         permission_mode = request.permission_mode or _permission_mode_for_agent_mode(request.mode)
         effective_mode = _effective_agent_mode(request.mode, permission_mode)
         turn_start_index = len(self._conversation.items())
-        self._conversation.add_user(request.text)
+        if request.text:
+            self._conversation.add_user(request.text)
         yield AgentEvent(
             type=AgentEventType.MODE_CHANGED,
             mode=effective_mode,
@@ -93,15 +99,28 @@ class AgentLoop:
 
         try:
             for iteration in range(1, self._limits.max_iterations + 1):
+                await self._dispatch_hook(
+                    Event.PRE_USER_MESSAGE,
+                    self._base_hook_payload(
+                        Event.PRE_USER_MESSAGE,
+                        mode=str(permission_mode),
+                        prompt=self._last_user_prompt(),
+                        iter=iteration,
+                    ),
+                )
                 active_base_registry = self._active_base_registry()
                 active_registry = registry_for_mode(active_base_registry, effective_mode)
                 self._refresh_system_prompt()
                 yield self._progress(iteration, "waiting_model")
-                async for compact_event in self._auto_manage_context(active_registry):
+                async for compact_event in self._auto_manage_context(
+                    active_registry, permission_mode
+                ):
                     yield compact_event
 
                 result: StreamTurnResult | None = None
-                async for collect_item in self._collect_with_emergency_retry(active_registry):
+                async for collect_item in self._collect_with_emergency_retry(
+                    active_registry, permission_mode
+                ):
                     if isinstance(collect_item, StreamTurnResult):
                         result = collect_item
                     else:
@@ -109,6 +128,15 @@ class AgentLoop:
                 assert result is not None
 
                 if result.error is not None:
+                    await self._dispatch_hook(
+                        Event.NOTIFICATION,
+                        self._base_hook_payload(
+                            Event.NOTIFICATION,
+                            mode=str(permission_mode),
+                            kind="stream_error",
+                            detail=str(result.error),
+                        ),
+                    )
                     yield AgentEvent(type=AgentEventType.ERROR, error=result.error)
                     yield self._stopped(AgentStopReason.STREAM_ERROR)
                     return
@@ -123,6 +151,14 @@ class AgentLoop:
 
                 if not result.tool_calls:
                     self._schedule_memory_update(turn_start_index)
+                    await self._dispatch_hook(
+                        Event.STOP,
+                        self._base_hook_payload(
+                            Event.STOP,
+                            mode=str(permission_mode),
+                            iter=iteration,
+                        ),
+                    )
                     yield self._stopped(AgentStopReason.MODEL_DONE)
                     return
 
@@ -134,6 +170,14 @@ class AgentLoop:
                         await self._record_recovery_if_read_file(skipped, None)
                         self._conversation.add_tool_result(skipped)
                         yield AgentEvent(type=AgentEventType.TOOL_RESULT, tool_result=skipped)
+                    await self._dispatch_hook(
+                        Event.STOP,
+                        self._base_hook_payload(
+                            Event.STOP,
+                            mode=str(permission_mode),
+                            iter=iteration,
+                        ),
+                    )
                     yield self._stopped(AgentStopReason.ITERATION_LIMIT)
                     return
 
@@ -186,6 +230,14 @@ class AgentLoop:
                     self._conversation.add_tool_result(ordered)
                     yield AgentEvent(type=AgentEventType.TOOL_RESULT, tool_result=ordered)
 
+            await self._dispatch_hook(
+                Event.STOP,
+                self._base_hook_payload(
+                    Event.STOP,
+                    mode=str(permission_mode),
+                    iter=self._limits.max_iterations,
+                ),
+            )
             yield self._stopped(AgentStopReason.ITERATION_LIMIT)
         except asyncio.CancelledError:
             yield self._stopped(AgentStopReason.USER_CANCELLED)
@@ -196,7 +248,15 @@ class AgentLoop:
             self._refresh_system_prompt()
             active_registry = self._effective_registry(mode or AgentMode.AGENT)
             estimated = self._estimate_tokens()
-            return await manage_context(
+            await self._dispatch_hook(
+                Event.PRE_COMPACT,
+                self._base_hook_payload(
+                    Event.PRE_COMPACT,
+                    trigger="manual",
+                    before_tokens=estimated,
+                ),
+            )
+            output = await manage_context(
                 ManageInput(
                     conversation=self._conversation,
                     provider=self._provider,
@@ -206,11 +266,30 @@ class AgentLoop:
                     estimated_tokens=estimated,
                 )
             )
+            await self._dispatch_hook(
+                Event.POST_COMPACT,
+                self._base_hook_payload(
+                    Event.POST_COMPACT,
+                    trigger="manual",
+                    before_tokens=output.before_tokens,
+                    after_tokens=output.after_tokens,
+                ),
+            )
+            return output
 
     async def _auto_manage_context(
-        self, active_registry: ToolRegistry
+        self, active_registry: ToolRegistry, permission_mode: PermissionMode
     ) -> AsyncIterator[AgentEvent]:
         estimated = self._estimate_tokens()
+        await self._dispatch_hook(
+            Event.PRE_COMPACT,
+            self._base_hook_payload(
+                Event.PRE_COMPACT,
+                mode=str(permission_mode),
+                trigger="auto",
+                before_tokens=estimated,
+            ),
+        )
         will_try_summary = (
             estimated >= auto_threshold(self._runtime.context_window)
             and not await self._runtime.circuit_breaker.tripped()
@@ -229,14 +308,36 @@ class AgentLoop:
                 )
             )
         except Exception as exc:
+            after_error = self._estimate_tokens()
+            await self._dispatch_hook(
+                Event.POST_COMPACT,
+                self._base_hook_payload(
+                    Event.POST_COMPACT,
+                    mode=str(permission_mode),
+                    trigger="auto",
+                    before_tokens=estimated,
+                    after_tokens=after_error,
+                    error=str(exc),
+                ),
+            )
             if will_try_summary:
                 yield self._compact_event(
                     CompactPhase.AFTER_AUTO,
                     estimated,
-                    self._estimate_tokens(),
+                    after_error,
                     error=exc,
                 )
             return
+        await self._dispatch_hook(
+            Event.POST_COMPACT,
+            self._base_hook_payload(
+                Event.POST_COMPACT,
+                mode=str(permission_mode),
+                trigger="auto",
+                before_tokens=output.before_tokens,
+                after_tokens=output.after_tokens,
+            ),
+        )
         if will_try_summary and output.compacted:
             yield self._compact_event(
                 CompactPhase.AFTER_AUTO,
@@ -248,6 +349,7 @@ class AgentLoop:
     async def _collect_with_emergency_retry(
         self,
         active_registry: ToolRegistry,
+        permission_mode: PermissionMode,
     ) -> AsyncIterator[CollectQueueItem]:
         emergency_retried = False
         while True:
@@ -267,6 +369,15 @@ class AgentLoop:
 
             emergency_retried = True
             before = self._estimate_tokens()
+            await self._dispatch_hook(
+                Event.PRE_COMPACT,
+                self._base_hook_payload(
+                    Event.PRE_COMPACT,
+                    mode=str(permission_mode),
+                    trigger="emergency",
+                    before_tokens=before,
+                ),
+            )
             yield self._compact_event(CompactPhase.BEFORE_EMERGENCY, before, before)
             try:
                 output = await manage_context(
@@ -280,10 +391,22 @@ class AgentLoop:
                     )
                 )
             except Exception as exc:
+                after_error = self._estimate_tokens()
+                await self._dispatch_hook(
+                    Event.POST_COMPACT,
+                    self._base_hook_payload(
+                        Event.POST_COMPACT,
+                        mode=str(permission_mode),
+                        trigger="emergency",
+                        before_tokens=before,
+                        after_tokens=after_error,
+                        error=str(exc),
+                    ),
+                )
                 yield self._compact_event(
                     CompactPhase.AFTER_EMERGENCY,
                     before,
-                    self._estimate_tokens(),
+                    after_error,
                     error=exc,
                 )
                 yield StreamTurnResult(reply="", error=exc)
@@ -291,6 +414,16 @@ class AgentLoop:
             self._runtime.usage_anchor = 0
             self._runtime.anchor_item_len = 0
             after = self._estimate_tokens()
+            await self._dispatch_hook(
+                Event.POST_COMPACT,
+                self._base_hook_payload(
+                    Event.POST_COMPACT,
+                    mode=str(permission_mode),
+                    trigger="emergency",
+                    before_tokens=output.before_tokens,
+                    after_tokens=after,
+                ),
+            )
             yield self._compact_event(
                 CompactPhase.AFTER_EMERGENCY,
                 output.before_tokens,
@@ -386,6 +519,7 @@ class AgentLoop:
             self._queue_execute_event(queue),
             self._limits.read_tool_concurrency,
             permission_mode,
+            hook_dispatcher=self._dispatch_hook,
         )
         await queue.put(tuple(results))
 
@@ -394,6 +528,37 @@ class AgentLoop:
             await queue.put(event)
 
         return on_event
+
+    async def _dispatch_hook(
+        self,
+        event: Event,
+        payload: Mapping[str, Any] | None = None,
+    ) -> DispatchResult:
+        if self._hook_engine is None:
+            return DispatchResult()
+        merged = self._base_hook_payload(event)
+        if payload:
+            merged.update(payload)
+        result = await self._hook_engine.dispatch(event, merged, self._runtime)
+        if result.injected_prompts:
+            self._runtime.append_hook_reminders(result.injected_prompts)
+        return result
+
+    def _base_hook_payload(self, event: Event, **extra: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "event": event.value,
+            "session_id": self._runtime.session.session_id,
+            "cwd": str(self._workspace),
+            "mode": "default",
+        }
+        payload.update(extra)
+        return payload
+
+    def _last_user_prompt(self) -> str:
+        for item in reversed(self._conversation.items()):
+            if isinstance(item, ChatMessage) and item.role == "user":
+                return item.content
+        return ""
 
     def _progress(self, iteration: int, phase: str) -> AgentEvent:
         return AgentEvent(
@@ -500,8 +665,13 @@ class AgentLoop:
         if self._system_prompt_builder is None:
             return
         setter = getattr(self._provider, "set_system_prompt", None)
-        if callable(setter):
-            setter(self._system_prompt_builder())
+        if not callable(setter):
+            return
+        prompt = self._system_prompt_builder()
+        reminders = self._runtime.take_hook_reminders()
+        if reminders:
+            prompt = "\n".join([prompt.rstrip(), "", "Hook Reminders:", "\n\n".join(reminders)])
+        setter(prompt)
 
     def _active_base_registry(self) -> ToolRegistry:
         allowed_tools = self._runtime.active_skills.allowed_tool_union()
@@ -520,7 +690,7 @@ class AgentLoop:
         ).casefold()
         return any(
             keyword in text
-            for keyword in ("\u8bb0\u4f4f", "\u8bb0\u5fc6", "\u522b\u5fd8", "remember", "memo")
+            for keyword in ("记住", "记忆", "别忘", "remember", "memo")
         )
 
 
@@ -537,6 +707,9 @@ def _effective_agent_mode(mode: AgentMode, permission_mode: PermissionMode) -> A
 
 
 def _workspace_from_executor(executor: ToolExecutor) -> Path:
+    active_cwd = cwd_from_ctx()
+    if active_cwd:
+        return Path(active_cwd)
     context = getattr(executor, "_context", None)
     workspace = getattr(context, "workspace", None)
     if isinstance(workspace, Path):
@@ -548,6 +721,3 @@ def _default_context_window(protocol: str) -> int:
     if protocol in {"openai", "openai-compat"}:
         return 128_000
     return 200_000
-
-
-

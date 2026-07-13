@@ -20,7 +20,7 @@ class SessionInfo:
 
 
 def list_sessions(workspace: Path) -> list[SessionInfo]:
-    sessions_dir = workspace / ".mewcode" / "sessions"
+    sessions_dir = workspace / ".coco-code" / "sessions"
     if not sessions_dir.exists():
         return []
     infos: list[SessionInfo] = []

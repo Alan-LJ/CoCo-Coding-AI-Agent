@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
@@ -30,6 +30,9 @@ class SessionRuntime:
     active_skills: ActiveSkills = field(default_factory=ActiveSkills)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     turn_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
+    pending_hook_reminders: list[str] = field(default_factory=list)
+    fired_hooks: set[str] = field(default_factory=set)
+    hook_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
 
     def track_turn_task(self, task: asyncio.Task[Any]) -> None:
         if task.done():
@@ -43,8 +46,35 @@ class SessionRuntime:
             if not task.done():
                 task.cancel()
 
+    def append_hook_reminders(self, prompts: list[str]) -> None:
+        self.pending_hook_reminders.extend(prompt for prompt in prompts if prompt)
+
+    def take_hook_reminders(self) -> list[str]:
+        reminders = list(self.pending_hook_reminders)
+        self.pending_hook_reminders.clear()
+        return reminders
+
+    def reset_hook_state(self) -> None:
+        self.pending_hook_reminders.clear()
+        self.fired_hooks.clear()
+        for task in tuple(self.hook_tasks):
+            if not task.done():
+                task.cancel()
+        self.hook_tasks.clear()
+
+    def track_hook_task(self, task: asyncio.Task[Any]) -> None:
+        if task.done():
+            self._consume_task_exception(task)
+            return
+        self.hook_tasks.add(task)
+        task.add_done_callback(self._forget_hook_task)
+
     def _forget_turn_task(self, task: asyncio.Task[Any]) -> None:
         self.turn_tasks.discard(task)
+        self._consume_task_exception(task)
+
+    def _forget_hook_task(self, task: asyncio.Task[Any]) -> None:
+        self.hook_tasks.discard(task)
         self._consume_task_exception(task)
 
     @staticmethod

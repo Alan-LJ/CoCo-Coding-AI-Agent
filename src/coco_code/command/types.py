@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 
 from coco_code.agent import AgentMode
 from coco_code.permission import Mode as PermissionMode
@@ -47,6 +47,25 @@ class CommandMemory:
     text: str
     files: tuple[str, ...] = ()
 
+@dataclass(frozen=True, slots=True)
+class WorktreeSummary:
+    name: str
+    path: str
+    branch: str
+    active: bool
+    manual: bool
+
+
+class WorktreeAccessor(Protocol):
+    async def create(self, name: str) -> tuple[str, str]: ...
+
+    def list(self) -> list[WorktreeSummary]: ...
+
+    async def enter(self, name: str) -> None: ...
+
+    async def exit(self, action: str, discard: bool) -> bool: ...
+
+    async def remove(self, name: str, discard: bool) -> None: ...
 
 class CommandUI(Protocol):
     def show_message(self, text: str) -> None: ...
@@ -89,6 +108,12 @@ class CommandUI(Protocol):
     def session_snapshot(self) -> CommandSession: ...
 
     def memory_snapshot(self) -> CommandMemory: ...
+
+    def worktree_accessor(self) -> WorktreeAccessor | None: ...
+
+    def hook_rules(self) -> list[Any]: ...
+
+    def hook_sources(self) -> list[str]: ...
 
     def refresh_status(self) -> None: ...
 

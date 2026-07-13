@@ -31,6 +31,23 @@ providers:
     )
     config = load(path=config_path)
     assert config.providers[0].name == "Claude"
+    assert config.enable_subagent_background is True
+
+
+def test_load_subagent_background_flag(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    write_config(
+        config_path,
+        """
+enableSubAgentBackground: false
+providers:
+  - name: Claude
+    protocol: anthropic
+    model: claude-test
+""",
+    )
+    config = load(path=config_path)
+    assert config.enable_subagent_background is False
 
 
 def test_missing_layers_are_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,16 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
-from coco_code.agent import (
-    AgentEventType,
-    AgentLimits,
-    AgentLoop,
-    AgentMode,
-    AgentRunRequest,
-    AgentStopReason,
-)
+from coco_code.agent import AgentLimits, AgentMode, LoopSubAgent
 from coco_code.agent.runtime import SessionRuntime, new_session_runtime
 from coco_code.config import ProviderConfig, effective_context_window
 from coco_code.conversation import ChatMessage, Conversation, ConversationItem
@@ -21,7 +14,7 @@ from coco_code.skills.catalog import SkillCatalog
 from coco_code.skills.render import render_skill_body
 from coco_code.skills.types import Skill, SkillContext, SkillMode
 from coco_code.tools.base import ConfirmCallback, ToolContext
-from coco_code.tools.executor import PermissionCallback, ToolExecutor
+from coco_code.tools.executor import PermissionCallback
 from coco_code.tools.registry import ToolRegistry
 
 ProviderFactory = Callable[[ProviderConfig, str], Provider]
@@ -102,46 +95,23 @@ class SkillExecutor:
         rendered = render_skill_body(skill, args)
         child_runtime.active_skills.activate(skill.meta.name, rendered, skill.meta.allowed_tools)
         child_conversation = Conversation.from_items(self._child_history(skill))
-        child_registry = self._child_registry(skill)
-        child_executor = ToolExecutor(
-            child_registry,
-            self._tool_context,
-            self._confirm_callback,
-            self._permission_engine,
-            self._permission_callback,
-            self._permission_mode,
-        )
-        system_prompt = self._build_prompt(provider_cfg, child_runtime)
-        provider = self._provider_factory(provider_cfg, system_prompt)
-        loop = AgentLoop(
-            provider,
-            child_conversation,
-            child_registry,
-            child_executor,
-            self._agent_limits,
+        runner = LoopSubAgent(
+            provider_cfg=provider_cfg,
+            registry=self._child_registry(skill),
+            tool_context=self._tool_context,
+            confirm_callback=self._confirm_callback,
+            prompt_builder=self._build_prompt,
+            agent_limits=self._agent_limits,
+            permission_mode=self._permission_mode,
+            provider_factory=self._provider_factory,
+            permission_engine=self._permission_engine,
+            permission_callback=self._permission_callback,
             runtime=child_runtime,
-            system_prompt_builder=lambda: self._build_prompt(provider_cfg, child_runtime),
         )
-        final_reply = ""
-        stop_reason: AgentStopReason | None = None
-        error_text = ""
-        request = AgentRunRequest(
-            _fork_request(skill, args), AgentMode.AGENT, self._permission_mode
-        )
-        async for event in loop.run(request):
-            if event.type == AgentEventType.ASSISTANT_MESSAGE and event.text:
-                final_reply = event.text
-            elif event.type == AgentEventType.ERROR and event.error is not None:
-                error_text = str(event.error)
-            elif event.type == AgentEventType.STOPPED:
-                stop_reason = event.stop_reason
-        if final_reply:
-            return final_reply
-        if error_text:
-            return f"Skill '{skill.meta.name}' failed: {error_text}"
-        if stop_reason is not None:
-            return f"Skill '{skill.meta.name}' finished with stop reason: {stop_reason.value}"
-        return f"Skill '{skill.meta.name}' finished without a model summary."
+        try:
+            return await runner.run_to_completion(child_conversation, _fork_request(skill, args))
+        except Exception as exc:
+            return f"Skill '{skill.meta.name}' failed: {exc}"
 
     def _latest_skill(self, name: str) -> Skill:
         skill = self._catalog.get_latest(name)
@@ -197,4 +167,3 @@ def _fork_request(skill: Skill, args: str) -> str:
             f"then return a concise summary: {args}"
         )
     return f"Run fork Skill '{skill.meta.name}', then return a concise summary."
-

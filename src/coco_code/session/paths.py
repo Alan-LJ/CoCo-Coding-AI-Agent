@@ -13,7 +13,7 @@ class SessionPaths:
 
 
 def session_paths(workspace: Path, session_id: str) -> SessionPaths:
-    session_dir = workspace / ".mewcode" / "sessions" / session_id
+    session_dir = workspace / ".coco-code" / "sessions" / session_id
     return SessionPaths(
         session_id=session_id,
         session_dir=session_dir,

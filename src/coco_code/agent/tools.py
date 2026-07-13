@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from time import monotonic
+from typing import Any
 
 from coco_code.agent.types import AgentEvent, AgentEventType, AgentMode, ToolBatch
+from coco_code.hook import DispatchResult, Event
 from coco_code.permission import Mode as PermissionMode
 from coco_code.tools.base import ConfirmationPolicy, ToolCall, ToolResult, ToolSpec
 from coco_code.tools.executor import ToolExecutor
 from coco_code.tools.registry import ToolRegistry, ToolRegistryError
 
 AgentEventCallback = Callable[[AgentEvent], Awaitable[None]]
+HookDispatcher = Callable[[Event, Mapping[str, Any]], Awaitable[DispatchResult]]
 
 
 def registry_for_mode(registry: ToolRegistry, mode: AgentMode) -> ToolRegistry:
@@ -71,6 +74,7 @@ async def execute_tool_batches(
     on_event: AgentEventCallback,
     concurrency_limit: int,
     permission_mode: PermissionMode = PermissionMode.DEFAULT,
+    hook_dispatcher: HookDispatcher | None = None,
 ) -> list[ToolResult]:
     results: list[ToolResult] = []
     total = len(batches)
@@ -84,12 +88,21 @@ async def execute_tool_batches(
                     on_event,
                     concurrency_limit,
                     permission_mode,
+                    hook_dispatcher,
                 )
             )
         else:
             for call in batch.calls:
                 results.append(
-                    await _execute_one(call, executor, on_event, index, total, permission_mode)
+                    await _execute_one(
+                        call,
+                        executor,
+                        on_event,
+                        index,
+                        total,
+                        permission_mode,
+                        hook_dispatcher,
+                    )
                 )
     return results
 
@@ -100,12 +113,15 @@ async def _execute_concurrent_batch(
     on_event: AgentEventCallback,
     concurrency_limit: int,
     permission_mode: PermissionMode,
+    hook_dispatcher: HookDispatcher | None,
 ) -> list[ToolResult]:
     semaphore = asyncio.Semaphore(max(1, concurrency_limit))
 
     async def run(call: ToolCall) -> ToolResult:
         async with semaphore:
-            return await _execute_one(call, executor, on_event, None, None, permission_mode)
+            return await _execute_one(
+                call, executor, on_event, None, None, permission_mode, hook_dispatcher
+            )
 
     return list(await asyncio.gather(*(run(call) for call in calls)))
 
@@ -117,13 +133,57 @@ async def _execute_one(
     batch_index: int | None,
     batch_total: int | None,
     permission_mode: PermissionMode,
+    hook_dispatcher: HookDispatcher | None,
 ) -> ToolResult:
+    started = monotonic()
     await on_event(AgentEvent(type=AgentEventType.TOOL_STARTED, tool_call=call))
-    return await executor.execute(call, permission_mode)
+    if hook_dispatcher is not None:
+        pre = await hook_dispatcher(
+            Event.PRE_TOOL_USE,
+            {
+                "tool_name": call.name,
+                "tool_input": call.arguments,
+                "permission_mode": str(permission_mode),
+                "batch_index": batch_index,
+                "batch_total": batch_total,
+            },
+        )
+        if pre.blocked:
+            return _hook_blocked_result(call, pre.blocking_hook_name, pre.reason, started)
+    result = await executor.execute(call, permission_mode)
+    if hook_dispatcher is not None:
+        await hook_dispatcher(
+            Event.POST_TOOL_USE,
+            {
+                "tool_name": call.name,
+                "tool_input": call.arguments,
+                "tool_result": result.summary if result.ok else result.error or result.summary,
+                "is_error": not result.ok,
+            },
+        )
+    return result
 
 
 def _can_run_concurrently(spec: ToolSpec) -> bool:
     return spec.read_only and not spec.destructive and spec.confirmation == ConfirmationPolicy.NEVER
+
+
+def _hook_blocked_result(
+    call: ToolCall,
+    hook_name: str,
+    reason: str,
+    started: float,
+) -> ToolResult:
+    message = f"[hook {hook_name}] {reason}".strip()
+    return ToolResult(
+        tool_call_id=call.id,
+        tool_name=call.name,
+        ok=False,
+        summary=message,
+        data={"hook_blocked": True, "hook_name": hook_name, "reason": reason},
+        error=message,
+        elapsed_ms=int((monotonic() - started) * 1000),
+    )
 
 
 def _tool_error(

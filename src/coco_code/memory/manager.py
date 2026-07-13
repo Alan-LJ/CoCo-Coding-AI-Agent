@@ -19,8 +19,10 @@ LOGGER = logging.getLogger(__name__)
 class MemoryManager:
     def __init__(self, project_root: Path, provider: Provider | None = None) -> None:
         self.project_root = project_root
-        self.project_store = MemoryStore(project_root / ".mewcode" / "memory", MemoryLevel.PROJECT)
-        self.user_store = MemoryStore(Path.home() / ".mewcode" / "memory", MemoryLevel.USER)
+        self.project_store = MemoryStore(
+            project_root / ".coco-code" / "memory", MemoryLevel.PROJECT
+        )
+        self.user_store = MemoryStore(Path.home() / ".coco-code" / "memory", MemoryLevel.USER)
         self.provider = provider
         self._lock = asyncio.Lock()
         self._index_cache = ""

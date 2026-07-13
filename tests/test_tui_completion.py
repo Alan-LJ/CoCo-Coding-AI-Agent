@@ -14,7 +14,7 @@ def test_completion_lists_slash_commands() -> None:
     menu = CompletionMenu()
     menu.update("/", build_default_registry())
     assert menu.active is True
-    assert len(menu.items) == 9
+    assert len(menu.items) == len(build_default_registry().visible())
 
 
 def test_completion_filters_by_prefix_and_alias() -> None:

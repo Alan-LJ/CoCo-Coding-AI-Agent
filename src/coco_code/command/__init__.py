@@ -13,6 +13,8 @@ from coco_code.command.types import (
     CommandStatus,
     CommandUI,
     ParsedCommand,
+    WorktreeAccessor,
+    WorktreeSummary,
 )
 
 __all__ = [
@@ -25,6 +27,8 @@ __all__ = [
     "CommandSession",
     "CommandStatus",
     "CommandUI",
+    "WorktreeAccessor",
+    "WorktreeSummary",
     "ParsedCommand",
     "build_default_registry",
     "parse_command",

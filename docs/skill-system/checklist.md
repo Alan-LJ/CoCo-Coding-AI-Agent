@@ -1,4 +1,4 @@
-﻿# Skill System Checklist
+# Skill System Checklist
 
 > Every item must be checkable and observable. Run commands from the repository root `.`.
 

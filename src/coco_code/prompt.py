@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
 
@@ -36,6 +36,7 @@ def build_system_prompt(
     memory: str = "",
     skills_catalog: str = "",
     active_skills: str = "",
+    hook_reminders: str = "",
 ) -> str:
     parts = [
         SYSTEM_PROMPT,
@@ -52,6 +53,9 @@ def build_system_prompt(
     active_skills = active_skills.strip()
     if active_skills:
         parts.extend(["", active_skills])
+    hook_reminders = hook_reminders.strip()
+    if hook_reminders:
+        parts.extend(["", "Hook Reminders:", hook_reminders])
     memory = memory.strip()
     if memory:
         parts.extend(
