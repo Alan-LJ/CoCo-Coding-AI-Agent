@@ -1,20 +1,30 @@
-# CoCo Code configuration example.
-# Keep real API keys out of this file when committing to GitHub.
-# Prefer environment variables:
-# - anthropic uses ANTHROPIC_API_KEY
-# - openai and openai-compat use OPENAI_API_KEY
-
 providers:
-  - name: Claude
+  - name: anthropic-official
     protocol: anthropic
-    model: claude-sonnet-4-5
+    base_url: https://api.anthropic.com
+    api_key: "your-api-key-here"
+    model: claude-sonnet-4-20250514
     thinking: true
 
-  - name: OpenAI
-    protocol: openai
-    model: gpt-5.1
+  # OpenAI provider example
+  # - name: openai-official
+  #   protocol: openai
+  #   base_url: https://api.openai.com/v1
+  #   api_key: "your-api-key-here"
+  #   model: gpt-4o
 
-  - name: OpenAI Compatible
-    protocol: openai-compat
-    model: qwen3-coder
-    base_url: https://example.com/v1
+permission_mode: default
+
+mcp_servers:
+  - name: context7
+    command: npx
+    args: ["-y", "@upstash/context7-mcp"]
+
+  # Streamable HTTP example (2025-03-26 spec, default when url is set):
+  # - name: my-http-mcp
+  #   url: https://example.com/mcp
+  #   transport: http   # optional; "http" (default) or "sse"
+  #   headers:
+  #     Authorization: "Bearer ${MY_TOKEN}"
+
+enable_coordinator_mode: false   # 设为 true 后创建 Team 时 Lead 只能调度不能写代码
