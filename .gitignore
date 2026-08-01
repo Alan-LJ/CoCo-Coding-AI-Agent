@@ -1,22 +1,21 @@
 # Virtual environments
-.codeagent/
 .venv/
+.test-venv/
 venv/
 env/
 
-# Python build and cache files
+# Python build, test, and tool caches
 __pycache__/
 *.py[cod]
-*$py.class
-*.pyo
 *.egg-info/
 build/
 dist/
-
-# Test, lint, and type-check caches
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.uv-cache/
+.uv-python/
+.test-tmp*/
 .coverage
 htmlcov/
 
@@ -24,21 +23,21 @@ htmlcov/
 .env
 .env.*
 !.env.example
+config.yaml
 .coco-code/*
 !.coco-code/config.yaml.example
-.mew*/
+.claude/
+.agents/
+.codex/
+CLAUDE.md
 *.pem
 *.key
 *.crt
 *.p12
 
-# Local upload/staging copies
-CoCo-Coding-AI-Agent-upload/
-
-# Logs and temporary files
+# Editors, logs, and local artifacts
+.idea/
+.vscode/
 *.log
-tmp/
-temp/
-TestAgentRun/
-text.txt
-%SystemDrive%/
+example-com-snapshot.md
+example-*.md
