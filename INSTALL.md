@@ -1,81 +1,66 @@
-# CoCo Code 安装与运行清单
+# CoCo Code 安装与运行
 
-## 环境要求
+## 使用 uv（推荐）
 
-- Python 3.12 或更高版本。
-- 本项目虚拟环境固定使用 `.codeagent`。
-
-## 创建或复用虚拟环境
-
-如果 `.codeagent` 已存在，可跳过创建步骤，直接安装依赖：
+安装 uv 后，在项目根目录执行：
 
 ```powershell
-python -m venv .codeagent
-.\.codeagent\Scripts\python.exe -m pip install --upgrade pip
-.\.codeagent\Scripts\python.exe -m pip install -e ".[dev]"
-```
-
-## 启动 CoCo Code
-
-```powershell
-.\.codeagent\Scripts\python.exe -m coco_code
-.\.codeagent\Scripts\coco-code.exe
-```
-
-## 开发验证命令
-
-```powershell
-.\.codeagent\Scripts\python.exe -m pytest
-.\.codeagent\Scripts\python.exe -m ruff check src tests
-.\.codeagent\Scripts\python.exe -m mypy src
-```
-
-## 配置文件
-
-复制示例配置：
-
-```powershell
+uv sync
 Copy-Item .\.coco-code\config.yaml.example .\.coco-code\config.yaml
+uv run coco-code
 ```
 
-配置文件支持三层覆盖：
+`uv sync` 会依据 `pyproject.toml` 和 `uv.lock` 创建或更新 `.venv`。
 
-1. 用户全局：`~/.coco-code/config.yaml`
-2. 项目级：`<项目根目录>/.coco-code/config.yaml`
-3. 本地覆盖：`<项目根目录>/.coco-code/config.local.yaml`
-
-后层覆盖前层。`providers` 使用整列覆盖，便于本地调试。
-
-## API Key
-
-可以直接写在 provider 的 `api_key` 字段，也可以省略并使用环境变量：
-
-- `anthropic`：`ANTHROPIC_API_KEY`
-- `openai` / `openai-compat`：`OPENAI_API_KEY`
-
-PowerShell 示例：
+## 使用 venv 和 pip
 
 ```powershell
-$env:ANTHROPIC_API_KEY = "你的 Anthropic Key"
-$env:OPENAI_API_KEY = "你的 OpenAI 或兼容端点 Key"
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e .
+Copy-Item .\.coco-code\config.yaml.example .\.coco-code\config.yaml
+.\.venv\Scripts\coco-code.exe
 ```
 
-上述 `$env:...` 方式只对当前 PowerShell 会话临时生效，不会写入配置文件。
+开发环境额外安装测试依赖：
 
-不要提交 `.coco-code/config.yaml` 或 `.coco-code/config.local.yaml`，它们已在 `.gitignore` 中忽略。
+```powershell
+.\.venv\Scripts\python.exe -m pip install pytest pytest-asyncio
+```
 
-## 当前已安装依赖
+## 配置 Provider
 
-运行依赖：
+本地配置文件为 `.coco-code/config.yaml`。可以配置：
 
-- `textual` 8.2.7
-- `rich` 15.0.0
-- `anthropic` 0.112.0
-- `openai` 2.44.0
-- `PyYAML` 6.0.3
+- `anthropic`
+- `openai`
+- `openai-compat`
 
-开发依赖：
+推荐使用环境变量提供密钥：
 
-- `pytest` 9.1.1
-- `ruff` 0.15.20
-- `mypy` 2.1.0
+```powershell
+$env:ANTHROPIC_API_KEY = "your-key"
+$env:OPENAI_API_KEY = "your-key"
+```
+
+配置文件中的 `api_key` 也可以直接填写，但该文件只能保存在本地。
+
+## MCP
+
+示例配置默认包含 Context7 stdio MCP。使用它需要 Node.js 和 `npx`：
+
+```yaml
+mcp_servers:
+  - name: context7
+    command: npx
+    args: ["-y", "@upstash/context7-mcp"]
+```
+
+项目也支持带 `url` 的 Streamable HTTP/SSE MCP。
+
+## 验证
+
+```powershell
+uv run coco-code --help
+uv run pytest -q
+```

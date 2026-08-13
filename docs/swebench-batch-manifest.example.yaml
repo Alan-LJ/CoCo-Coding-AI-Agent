@@ -1,0 +1,29 @@
+# SWE-bench-Live inference batch manifest, version 1.
+# Paths beginning with ~ are resolved in WSL. Relative paths are resolved from
+# this manifest's directory. Keep API keys in env_file, never in this file.
+version: 1
+experiment_id: deepseek-v4-pro-pilot-v1
+model_name: deepseek-v4-pro
+
+coco_code_source: "/mnt/d/AI/coco code-python"
+config_file: ~/.coco-code/eval-config.yaml
+env_file: ~/.coco-code/swebench.env
+output_dir: ~/swebench-results/pilot-v1
+
+# Conservative settings for a 32 GB host. Instances run sequentially.
+python_bin: /usr/bin/python3.11
+cpus: 8
+memory: 20g
+timeout_seconds: 3600
+bootstrap_timeout_seconds: 1200
+
+instances:
+  - instance_id: amoffat__sh-744
+    problem_file: ~/swebench-work/amoffat__sh-744.problem.txt
+    # image is optional. When omitted, CoCo Code derives the standard
+    # starryzhang SWE-bench-Live x86_64 image name from instance_id.
+
+  # Add the other selected pilot instances using the same two fields:
+  # - instance_id: owner__repository-issue
+  #   problem_file: ~/swebench-work/owner__repository-issue.problem.txt
+  #   image: optional/custom-image:latest

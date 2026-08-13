@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>番茄钟</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body data-phase="work">
+  <main class="app">
+    <header class="app-header">
+      <h1>番茄钟</h1>
+      <button id="settings-btn" class="icon-btn" title="设置" aria-label="设置">&#9881;</button>
+    </header>
+
+    <div id="phase-label" class="phase-label">专注中</div>
+
+    <div class="ring-wrap">
+      <svg class="ring" viewBox="0 0 260 260">
+        <circle class="ring-bg" cx="130" cy="130" r="120" />
+        <circle id="ring-progress" class="ring-progress" cx="130" cy="130" r="120" />
+      </svg>
+      <div id="time-display" class="time-display">25:00</div>
+    </div>
+
+    <div id="cycle-dots" class="cycle-dots" title="每 4 个番茄一个长休息">
+      <span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+    </div>
+
+    <input id="task-input" class="task-input" type="text" placeholder="正在做什么？" maxlength="50">
+
+    <div class="controls">
+      <button id="reset-btn" class="btn btn-secondary" title="重置">重置</button>
+      <button id="start-btn" class="btn btn-primary">开始</button>
+      <button id="skip-btn" class="btn btn-secondary" title="跳过当前阶段">跳过</button>
+    </div>
+  </main>
+
+  <div id="settings-panel" class="settings-panel hidden">
+    <div class="settings-card">
+      <h2>设置</h2>
+      <label>
+        专注时长（分钟）
+        <input id="set-work" type="number" min="1" max="120" value="25">
+      </label>
+      <label>
+        短休息（分钟）
+        <input id="set-short" type="number" min="1" max="60" value="5">
+      </label>
+      <label>
+        长休息（分钟）
+        <input id="set-long" type="number" min="1" max="120" value="15">
+      </label>
+      <label class="checkbox-label">
+        <input id="set-notify" type="checkbox">
+        阶段结束时发送浏览器通知
+      </label>
+      <div class="settings-actions">
+        <button id="settings-cancel" class="btn btn-secondary">取消</button>
+        <button id="settings-save" class="btn btn-primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

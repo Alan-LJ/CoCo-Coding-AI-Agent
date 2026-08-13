@@ -1,0 +1,281 @@
+:root {
+  --bg: #fdf6f3;
+  --card: #ffffff;
+  --text: #2d2a32;
+  --muted: #8a8494;
+  --accent: #e74c3c;
+  --accent-soft: #fbeae8;
+  --ring-track: #f0e6e2;
+}
+
+body[data-phase="short"],
+body[data-phase="long"] {
+  --accent: #27ae60;
+  --accent-soft: #e8f7ef;
+  --ring-track: #e2efe8;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.5s;
+}
+
+body[data-phase="short"],
+body[data-phase="long"] {
+  --bg: #f2faf6;
+}
+
+.app {
+  width: 100%;
+  max-width: 420px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+}
+
+.app-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.app-header h1 {
+  font-size: 1.4rem;
+  font-weight: 600;
+}
+
+.icon-btn {
+  border: none;
+  background: none;
+  font-size: 1.5rem;
+  cursor: pointer;
+  color: var(--muted);
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+
+.icon-btn:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text);
+}
+
+.phase-label {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 6px 18px;
+  border-radius: 999px;
+  transition: all 0.3s;
+}
+
+.ring-wrap {
+  position: relative;
+  width: 260px;
+  height: 260px;
+}
+
+.ring {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+
+.ring circle {
+  fill: none;
+  stroke-width: 10;
+  stroke-linecap: round;
+}
+
+.ring-bg {
+  stroke: var(--ring-track);
+}
+
+.ring-progress {
+  stroke: var(--accent);
+  stroke-dasharray: 754;
+  stroke-dashoffset: 0;
+  transition: stroke-dashoffset 0.4s linear, stroke 0.3s;
+}
+
+.time-display {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 3.6rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 2px;
+}
+
+.cycle-dots {
+  display: flex;
+  gap: 10px;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--ring-track);
+  transition: background 0.3s;
+}
+
+.dot.filled {
+  background: var(--accent);
+}
+
+.task-input {
+  width: 100%;
+  max-width: 300px;
+  padding: 10px 14px;
+  border: 1px solid #e5dde0;
+  border-radius: 10px;
+  font-size: 0.95rem;
+  text-align: center;
+  outline: none;
+  background: var(--card);
+  transition: border-color 0.2s;
+}
+
+.task-input:focus {
+  border-color: var(--accent);
+}
+
+.controls {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.btn {
+  border: none;
+  border-radius: 10px;
+  padding: 12px 22px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+  min-width: 110px;
+  font-weight: 600;
+}
+
+.btn-primary:hover {
+  filter: brightness(1.08);
+}
+
+.btn-secondary {
+  background: transparent;
+  color: var(--muted);
+}
+
+.btn-secondary:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text);
+}
+
+.settings-panel {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+
+.settings-panel.hidden {
+  display: none;
+}
+
+.settings-card {
+  background: var(--card);
+  border-radius: 16px;
+  padding: 28px;
+  width: 90%;
+  max-width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.settings-card h2 {
+  font-size: 1.2rem;
+  margin-bottom: 4px;
+}
+
+.settings-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.settings-card input[type="number"] {
+  padding: 8px 12px;
+  border: 1px solid #e5dde0;
+  border-radius: 8px;
+  font-size: 1rem;
+  outline: none;
+}
+
+.settings-card input[type="number"]:focus {
+  border-color: var(--accent);
+}
+
+.checkbox-label {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 8px !important;
+  color: var(--text) !important;
+}
+
+.settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+body.flash .ring-progress {
+  animation: flash 0.5s ease-in-out 3;
+}
+
+@keyframes flash {
+  50% {
+    opacity: 0.2;
+  }
+}
+
+@media (max-width: 480px) {
+  .ring-wrap {
+    width: 220px;
+    height: 220px;
+  }
+
+  .time-display {
+    font-size: 3rem;
+  }
+}
